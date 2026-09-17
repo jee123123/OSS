@@ -2,16 +2,21 @@ def read_data(filename):
     # TODO) Read `filename` as a list of integers
     data = []
 
-    for line in filename.readlines():
-        data.append(line)
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            row = [int(val) for val in line.split(',')]
+            data.append(row)
     return data
 
 def calc_weighted_average(data_2d, weight):
     # TODO) Calculate the weighted averages of each row of `data_2d`
     average = []
 
-    for i in range in data:
-        average.append(int(data_2d[i][0] * 40 / 125 + int(data_2d[i][1])) * 60 / 100)
+    for row in data_2d:
+        weightVal = row[0] * weight[0] + row[1] * weight[1]
+        average.append(weightVal)
+
     return average
 
 def analyze_data(data_1d):
@@ -21,11 +26,21 @@ def analyze_data(data_1d):
     var = 0
     median = 0
 
+    n = len(data_1d)
+    mean = sum(data_1d) / n
 
+    sq_sum = 0
+    for i in data_1d:
+        sq_sum += i ** 2
+    var = sq_sum / n - mean ** 2
+
+    sorted_data = sorted(data_1d)
+    median = sorted_data[n // 2]
+    
     return mean, var, median, min(data_1d), max(data_1d)
 
 if __name__ == '__main__':
-    data = read_data('data/class_score_en.csv')
+    data = read_data('data/class_score_kr.csv')
     if data and len(data[0]) == 2: # Check 'data' is valid
         average = calc_weighted_average(data, [40/125, 60/100])
 
