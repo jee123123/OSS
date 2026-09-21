@@ -5,6 +5,8 @@ def read_data(filename):
     with open(filename, 'r') as f:
         for line in f:
             line = line.strip()
+            if not line or line.startswith('#'):
+                continue
             row = [int(val) for val in line.split(',')]
             data.append(row)
     return data
@@ -40,7 +42,7 @@ def analyze_data(data_1d):
     return mean, var, median, min(data_1d), max(data_1d)
 
 if __name__ == '__main__':
-    data = read_data('data/class_score_kr.csv')
+    data = read_data('data/class_score_en.csv')
     if data and len(data[0]) == 2: # Check 'data' is valid
         average = calc_weighted_average(data, [40/125, 60/100])
 
