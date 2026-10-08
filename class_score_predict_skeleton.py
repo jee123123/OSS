@@ -12,6 +12,12 @@ data = np.vstack((class_kr, class_en))
 # Estimate a line: final = slope * midterm + y_intercept
 line = [0, 0] # TODO) Find the best [slope, y_intercept] from 'data'
 
+x, y = data[:, 0], data[:, 1]
+A = np.vstack((x, np.ones_like(x))).T
+W = np.linalg.pinv(A) @ y
+line = [W[0], W[1]]
+
+
 # Predict scores
 final = lambda midterm: line[0] * midterm + line[1]
 while True:
