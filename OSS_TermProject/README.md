@@ -45,6 +45,3 @@ Audiveris가 다른 위치에 설치되어 있으면 `--audiveris` 뒤에 해당
 
 Audiveris와 Python 의존성은 각자의 라이선스로 배포됩니다. 구성 요소와 라이선스 정보는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 정리했습니다. Audiveris는 별도로 설치하는 프로그램이며 이 저장소에 포함되어 있지 않습니다.
 
-## 기여
-
-버그 제보와 개선 제안을 환영합니다. 이 저장소에 기여하는 코드는 별도 합의가 없는 한 프로젝트의 MIT 라이선스로 배포할 수 있어야 합니다.
