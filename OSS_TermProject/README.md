@@ -13,7 +13,7 @@
 ## 준비물
 
 - Python 3.10 이상
-- [Audiveris](https://github.com/Audiveris/audiveris): 별도로 설치해야 합니다. 이 저장소에는 Audiveris 실행 파일이 포함되어 있지 않습니다.
+- [Audiveris](https://github.com/Audiveris/audiveris): 현재 명령줄 버전에서는 별도로 설치해야 합니다. 이 저장소에는 Audiveris 실행 파일이 포함되어 있지 않습니다.
 
 ## 설치
 
@@ -24,6 +24,17 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -e .
 ```
+
+## GUI 실행
+
+GUI 기능을 사용할 때는 선택 의존성을 설치한 다음 실행합니다. 현재 GUI는 여러 악보 이미지를 대기열에 넣어 순서대로 처리하고, 결과 MIDI를 지정한 폴더에 저장합니다.
+
+```powershell
+python -m pip install -e ".[gui]"
+score2midi-gui
+```
+
+Audiveris 실행 파일은 `PATH`에서 `audiveris` 명령으로 찾을 수 있어야 합니다. 아직 Audiveris를 포함한 설치 패키지는 제공하지 않습니다.
 
 ## 사용법
 
@@ -43,5 +54,7 @@ Audiveris가 다른 위치에 설치되어 있으면 `--audiveris` 뒤에 해당
 
 이 저장소의 Score2MIDI 코드는 MIT License로 배포합니다. 자세한 내용은 [LICENSE](LICENSE)를 확인하세요.
 
-Audiveris와 Python 의존성은 각자의 라이선스로 배포됩니다. 구성 요소와 라이선스 정보는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 정리했습니다. Audiveris는 별도로 설치하는 프로그램이며 이 저장소에 포함되어 있지 않습니다.
+Audiveris와 Python 의존성은 각자의 라이선스로 배포됩니다. 구성 요소와 라이선스 정보는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 정리했습니다.
+
+향후 Windows 데스크톱 배포판은 사용자가 Audiveris를 따로 설치하지 않아도 되도록 Audiveris를 별도 프로그램으로 함께 제공하는 방향으로 구성할 계획입니다. 현재는 설치 패키지가 제공되지 않으므로, 위 명령줄 사용법대로 Audiveris를 별도로 설치해야 합니다. Audiveris를 포함한 배포판을 만들 때는 포함한 정확한 버전, 해당 버전의 소스 코드와 라이선스 고지를 함께 제공합니다.
 
