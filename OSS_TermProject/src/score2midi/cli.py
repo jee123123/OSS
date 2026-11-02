@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from music21 import converter
+from PIL import Image
 
 
 def convert_score(image: Path, output: Path, audiveris: str) -> None:
@@ -26,6 +27,22 @@ def convert_score(image: Path, output: Path, audiveris: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="score2midi-") as temp_dir:
+        input_image = image.resolve()
+
+        with Image.open(image) as source:
+            longest_edge = max(source.size)
+            if longest_edge < 1600:
+                scale = 1600 / longest_edge
+                new_size = (
+                    round(source.width * scale),
+                    round(source.height * scale),
+                )
+                input_image = Path(temp_dir) / "prepared_score.png"
+                source.convert("RGB").resize(
+                    new_size,
+                    Image.Resampling.LANCZOS,
+                ).save(input_image, dpi=(300, 300))
+
         result = subprocess.run(
             [
                 audiveris_command,
@@ -34,15 +51,16 @@ def convert_score(image: Path, output: Path, audiveris: str) -> None:
                 "-export",
                 "-output",
                 temp_dir,
-                str(image.resolve()),
+                str(input_image),
             ],
             capture_output=True,
-            text=True,
             check=False,
         )
 
         if result.returncode != 0:
-            details = result.stderr.strip() or result.stdout.strip()
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            stdout = result.stdout.decode("utf-8", errors="replace").strip()
+            details = stderr or stdout or "자세한 오류 메시지가 없습니다."
             raise RuntimeError(f"Audiveris 실행 실패:\n{details}")
 
         candidates = (

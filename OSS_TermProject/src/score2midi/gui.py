@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -64,21 +65,31 @@ class Score2MidiWindow(QMainWindow):
         self.resize(760, 520)
 
         self.output_dir = Path.cwd() / "outputs"
-        self.audiveris = "audiveris"
+        self.settings = QSettings("Score2MIDI", "Score2MIDI")
+        self.audiveris = str(
+            self.settings.value("audiveris_path", "audiveris")
+        )
 
         self.file_list = QListWidget()
         self.progress = QProgressBar()
+        self.audiveris_label = QLabel(f"Audiveris: {self.audiveris}")
         self.output_label = QLabel(f"저장 위치: {self.output_dir}")
 
         self.add_button = QPushButton("악보 추가")
         self.remove_button = QPushButton("선택 삭제")
+        self.audiveris_button = QPushButton("Audiveris 선택")
         self.output_button = QPushButton("저장 폴더 선택")
         self.convert_button = QPushButton("변환 시작")
 
         self.add_button.clicked.connect(self.add_files)
         self.remove_button.clicked.connect(self.remove_selected)
+        self.audiveris_button.clicked.connect(self.choose_audiveris)
         self.output_button.clicked.connect(self.choose_output_dir)
         self.convert_button.clicked.connect(self.start_conversion)
+
+        audiveris_layout = QHBoxLayout()
+        audiveris_layout.addWidget(self.audiveris_label)
+        audiveris_layout.addWidget(self.audiveris_button)
 
         buttons = QHBoxLayout()
         for button in (
@@ -94,6 +105,7 @@ class Score2MidiWindow(QMainWindow):
             QLabel("변환할 악보를 추가하세요. 여러 파일을 선택할 수 있습니다.")
         )
         layout.addWidget(self.file_list)
+        layout.addLayout(audiveris_layout)
         layout.addWidget(self.output_label)
         layout.addWidget(self.progress)
         layout.addLayout(buttons)
@@ -133,7 +145,36 @@ class Score2MidiWindow(QMainWindow):
             self.output_dir = Path(folder)
             self.output_label.setText(f"저장 위치: {self.output_dir}")
 
+    def choose_audiveris(self) -> None:
+        current = Path(self.audiveris)
+        start_dir = (
+            str(current.parent)
+            if current.is_file()
+            else r"C:\Program Files\Audiveris"
+        )
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Audiveris 실행 파일 선택",
+            start_dir,
+            "실행 파일 (*.exe);;모든 파일 (*)",
+        )
+        if filename:
+            self.audiveris = filename
+            self.settings.setValue("audiveris_path", filename)
+            self.audiveris_label.setText(f"Audiveris: {filename}")
+
     def start_conversion(self) -> None:
+        if (
+            shutil.which(self.audiveris) is None
+            and not Path(self.audiveris).is_file()
+        ):
+            QMessageBox.warning(
+                self,
+                "Audiveris를 찾을 수 없음",
+                "Audiveris 선택 버튼을 눌러 Audiveris.exe를 지정하세요.",
+            )
+            return
+
         images = [
             Path(self.file_list.item(i).data(Qt.ItemDataRole.UserRole))
             for i in range(self.file_list.count())
@@ -166,6 +207,7 @@ class Score2MidiWindow(QMainWindow):
         for button in (
             self.add_button,
             self.remove_button,
+            self.audiveris_button,
             self.output_button,
             self.convert_button,
         ):

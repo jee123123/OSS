@@ -34,7 +34,7 @@ python -m pip install -e ".[gui]"
 score2midi-gui
 ```
 
-Audiveris 실행 파일은 `PATH`에서 `audiveris` 명령으로 찾을 수 있어야 합니다. 아직 Audiveris를 포함한 설치 패키지는 제공하지 않습니다.
+GUI를 처음 사용할 때 `Audiveris 선택` 버튼을 눌러 `Audiveris.exe`를 지정하세요. 선택한 경로는 사용자 설정에 저장되어 다음 실행부터 자동으로 사용됩니다. 아직 Audiveris를 포함한 설치 패키지는 제공하지 않습니다.
 
 ## 사용법
 
