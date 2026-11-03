@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -22,40 +23,28 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from score2midi.cli import convert_score
+from score2midi.cli import convert_pages
 
 
 class ConversionWorker(QThread):
-    """Convert queued images sequentially without blocking the window."""
+    """Convert ordered score pages without blocking the window."""
 
-    status_changed = Signal(int, str)
-    progress_changed = Signal(int)
+    succeeded = Signal(str)
+    failed = Signal(str)
 
-    def __init__(self, images: list[Path], output_dir: Path, audiveris: str):
+    def __init__(self, images: list[Path], output: Path, audiveris: str):
         super().__init__()
         self.images = images
-        self.output_dir = output_dir
+        self.output = output
         self.audiveris = audiveris
 
     def run(self) -> None:
-        total = len(self.images)
-        for index, image in enumerate(self.images):
-            self.status_changed.emit(index, "변환 중…")
-
-            output = self.output_dir / f"{image.stem}.mid"
-            suffix = 2
-            while output.exists():
-                output = self.output_dir / f"{image.stem}_{suffix}.mid"
-                suffix += 1
-
-            try:
-                convert_score(image, output, self.audiveris)
-            except Exception as error:
-                self.status_changed.emit(index, f"실패: {error}")
-            else:
-                self.status_changed.emit(index, f"완료: {output.name}")
-
-            self.progress_changed.emit(int((index + 1) * 100 / total))
+        try:
+            convert_pages(self.images, self.output, self.audiveris)
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            self.succeeded.emit(str(self.output))
 
 
 class Score2MidiWindow(QMainWindow):
@@ -72,17 +61,23 @@ class Score2MidiWindow(QMainWindow):
 
         self.file_list = QListWidget()
         self.progress = QProgressBar()
+        self.status_label = QLabel("대기 중")
+        self.output_name = QLineEdit("score.mid")
         self.audiveris_label = QLabel(f"Audiveris: {self.audiveris}")
         self.output_label = QLabel(f"저장 위치: {self.output_dir}")
 
         self.add_button = QPushButton("악보 추가")
         self.remove_button = QPushButton("선택 삭제")
+        self.move_up_button = QPushButton("위로")
+        self.move_down_button = QPushButton("아래로")
         self.audiveris_button = QPushButton("Audiveris 선택")
         self.output_button = QPushButton("저장 폴더 선택")
         self.convert_button = QPushButton("변환 시작")
 
         self.add_button.clicked.connect(self.add_files)
         self.remove_button.clicked.connect(self.remove_selected)
+        self.move_up_button.clicked.connect(lambda: self.move_selected(-1))
+        self.move_down_button.clicked.connect(lambda: self.move_selected(1))
         self.audiveris_button.clicked.connect(self.choose_audiveris)
         self.output_button.clicked.connect(self.choose_output_dir)
         self.convert_button.clicked.connect(self.start_conversion)
@@ -91,10 +86,21 @@ class Score2MidiWindow(QMainWindow):
         audiveris_layout.addWidget(self.audiveris_label)
         audiveris_layout.addWidget(self.audiveris_button)
 
-        buttons = QHBoxLayout()
+        page_buttons = QHBoxLayout()
         for button in (
             self.add_button,
             self.remove_button,
+            self.move_up_button,
+            self.move_down_button,
+        ):
+            page_buttons.addWidget(button)
+
+        output_name_layout = QHBoxLayout()
+        output_name_layout.addWidget(QLabel("결과 파일 이름:"))
+        output_name_layout.addWidget(self.output_name)
+
+        buttons = QHBoxLayout()
+        for button in (
             self.output_button,
             self.convert_button,
         ):
@@ -102,11 +108,17 @@ class Score2MidiWindow(QMainWindow):
 
         layout = QVBoxLayout()
         layout.addWidget(
-            QLabel("변환할 악보를 추가하세요. 여러 파일을 선택할 수 있습니다.")
+            QLabel(
+                "다중 페이지 PDF 한 개 또는 순서대로 결합할 "
+                "이미지 여러 장을 추가하세요."
+            )
         )
         layout.addWidget(self.file_list)
+        layout.addLayout(page_buttons)
         layout.addLayout(audiveris_layout)
+        layout.addLayout(output_name_layout)
         layout.addWidget(self.output_label)
+        layout.addWidget(self.status_label)
         layout.addWidget(self.progress)
         layout.addLayout(buttons)
 
@@ -117,9 +129,9 @@ class Score2MidiWindow(QMainWindow):
     def add_files(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(
             self,
-            "악보 이미지 선택",
+            "악보 선택",
             "",
-            "악보 이미지 (*.png *.jpg *.jpeg *.tif *.tiff)",
+            "악보 파일 (*.pdf *.png *.jpg *.jpeg *.tif *.tiff)",
         )
         existing = {
             self.file_list.item(i).data(Qt.ItemDataRole.UserRole)
@@ -136,6 +148,16 @@ class Score2MidiWindow(QMainWindow):
     def remove_selected(self) -> None:
         for item in self.file_list.selectedItems():
             self.file_list.takeItem(self.file_list.row(item))
+
+    def move_selected(self, offset: int) -> None:
+        row = self.file_list.currentRow()
+        new_row = row + offset
+        if row < 0 or not 0 <= new_row < self.file_list.count():
+            return
+
+        item = self.file_list.takeItem(row)
+        self.file_list.insertItem(new_row, item)
+        self.file_list.setCurrentRow(new_row)
 
     def choose_output_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -183,39 +205,76 @@ class Score2MidiWindow(QMainWindow):
             QMessageBox.information(self, "악보 없음", "먼저 악보 파일을 추가하세요.")
             return
 
+        pdf_inputs = [
+            image for image in images if image.suffix.lower() == ".pdf"
+        ]
+        if pdf_inputs and len(images) != 1:
+            QMessageBox.warning(
+                self,
+                "입력 형식 오류",
+                "PDF는 한 번에 하나만 선택하세요. "
+                "PDF와 이미지 파일을 함께 사용할 수 없습니다.",
+            )
+            return
+
+        filename = self.output_name.text().strip()
+        if not filename or Path(filename).name != filename:
+            QMessageBox.warning(
+                self,
+                "파일 이름 오류",
+                "폴더 경로를 제외한 MIDI 파일 이름을 입력하세요.",
+            )
+            return
+        if Path(filename).suffix.lower() != ".mid":
+            filename += ".mid"
+
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             QMessageBox.critical(self, "저장 폴더 오류", str(error))
             return
 
-        self.progress.setValue(0)
+        output = self.output_dir / filename
+        original_stem = output.stem
+        suffix = 2
+        while output.exists():
+            output = output.with_name(f"{original_stem}_{suffix}.mid")
+            suffix += 1
+
+        self.progress.setRange(0, 0)
+        self.status_label.setText("여러 페이지를 하나의 MIDI로 변환 중…")
         self.set_controls_enabled(False)
 
-        self.worker = ConversionWorker(images, self.output_dir, self.audiveris)
-        self.worker.status_changed.connect(self.update_status)
-        self.worker.progress_changed.connect(self.progress.setValue)
-        self.worker.finished.connect(self.conversion_finished)
+        self.worker = ConversionWorker(images, output, self.audiveris)
+        self.worker.succeeded.connect(self.conversion_succeeded)
+        self.worker.failed.connect(self.conversion_failed)
+        self.worker.finished.connect(lambda: self.set_controls_enabled(True))
         self.worker.start()
 
-    def update_status(self, index: int, status: str) -> None:
-        item = self.file_list.item(index)
-        image_path = item.data(Qt.ItemDataRole.UserRole)
-        item.setText(f"{image_path}  —  {status}")
-
     def set_controls_enabled(self, enabled: bool) -> None:
-        for button in (
+        for widget in (
             self.add_button,
             self.remove_button,
+            self.move_up_button,
+            self.move_down_button,
             self.audiveris_button,
             self.output_button,
             self.convert_button,
+            self.output_name,
         ):
-            button.setEnabled(enabled)
+            widget.setEnabled(enabled)
 
-    def conversion_finished(self) -> None:
-        self.set_controls_enabled(True)
-        QMessageBox.information(self, "변환 완료", "대기열의 모든 악보 처리가 끝났습니다.")
+    def conversion_succeeded(self, output: str) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        self.status_label.setText(f"완료: {output}")
+        QMessageBox.information(self, "변환 완료", f"MIDI 파일을 저장했습니다.\n{output}")
+
+    def conversion_failed(self, error: str) -> None:
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.status_label.setText("변환 실패")
+        QMessageBox.critical(self, "변환 실패", error)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt event naming convention
         if hasattr(self, "worker") and self.worker.isRunning():
