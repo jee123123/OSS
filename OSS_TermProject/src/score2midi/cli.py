@@ -10,7 +10,8 @@ from pathlib import Path
 from music21 import converter, instrument
 from PIL import Image
 
-MIN_PAGE_LONG_EDGE = 3000
+from score2midi.preprocess import preprocess_page
+from score2midi.rhythm_corrector import correct_rhythm
 
 
 def convert_score(image: Path, output: Path, audiveris: str) -> None:
@@ -59,18 +60,7 @@ def convert_pages(
             pages = []
             for image in images:
                 with Image.open(image) as source:
-                    page = source.convert("RGB")
-                    longest_edge = max(page.size)
-                    if longest_edge < MIN_PAGE_LONG_EDGE:
-                        scale = MIN_PAGE_LONG_EDGE / longest_edge
-                        page = page.resize(
-                            (
-                                round(page.width * scale),
-                                round(page.height * scale),
-                            ),
-                            Image.Resampling.LANCZOS,
-                        )
-                    pages.append(page)
+                    pages.append(preprocess_page(source))
 
             input_document = Path(temp_dir) / "score.pdf"
             try:
@@ -114,6 +104,7 @@ def convert_pages(
             raise FileNotFoundError("Audiveris가 MusicXML 파일을 만들지 않았습니다.")
 
         score = converter.parse(str(candidates[0]))
+        rhythm_warnings = correct_rhythm(score)
         for part in score.parts:
             detected_instruments = list(
                 part.recurse().getElementsByClass(instrument.Instrument)
@@ -124,6 +115,12 @@ def convert_pages(
             else:
                 part.insert(0, instrument.Piano())
         score.write("midi", fp=str(output))
+
+        if rhythm_warnings:
+            output.with_suffix(".rhythm.txt").write_text(
+                "\n".join(rhythm_warnings),
+                encoding="utf-8",
+            )
 
 
 def main() -> int:
