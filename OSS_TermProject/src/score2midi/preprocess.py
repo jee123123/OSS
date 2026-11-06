@@ -1,14 +1,17 @@
 """Image preparation for optical music recognition."""
 
-from PIL import Image, ImageFilter, ImageOps
+from pathlib import Path
+
+import pypdfium2 as pdfium
+from PIL import Image, ImageOps
 
 MIN_PAGE_LONG_EDGE = 3000
+PDF_RENDER_DPI = 300
 
 
 def preprocess_page(source: Image.Image) -> Image.Image:
-    """Improve contrast and sharpness without removing staff lines."""
+    """Preserve score symbols while ensuring a usable resolution."""
     page = ImageOps.grayscale(source)
-    page = ImageOps.autocontrast(page, cutoff=1)
 
     longest_edge = max(page.size)
     if longest_edge < MIN_PAGE_LONG_EDGE:
@@ -21,11 +24,30 @@ def preprocess_page(source: Image.Image) -> Image.Image:
             Image.Resampling.LANCZOS,
         )
 
-    page = page.filter(
-        ImageFilter.UnsharpMask(
-            radius=1.2,
-            percent=130,
-            threshold=3,
-        )
-    )
-    return page.convert("RGB")
+    return page
+
+
+def preprocess_pdf(source: Path) -> list[Image.Image]:
+    """Render PDF pages without destructive sharpening."""
+    document = pdfium.PdfDocument(source)
+    pages: list[Image.Image] = []
+
+    try:
+        for page_index in range(len(document)):
+            page = document[page_index]
+            bitmap = page.render(scale=PDF_RENDER_DPI / 72)
+            rendered = bitmap.to_pil()
+
+            try:
+                pages.append(preprocess_page(rendered))
+            finally:
+                rendered.close()
+                bitmap.close()
+                page.close()
+    finally:
+        document.close()
+
+    if not pages:
+        raise ValueError("PDF에 변환할 페이지가 없습니다.")
+
+    return pages

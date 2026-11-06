@@ -7,6 +7,23 @@ from music21 import stream
 
 GRID_DIVISORS = (4, 3, 8)
 SNAP_TOLERANCE = Fraction(1, 32)
+ALLOWED_DURATIONS = frozenset(
+    {
+        Fraction(1, 8),
+        Fraction(1, 6),
+        Fraction(1, 4),
+        Fraction(1, 3),
+        Fraction(3, 8),
+        Fraction(1, 2),
+        Fraction(2, 3),
+        Fraction(3, 4),
+        Fraction(1),
+        Fraction(3, 2),
+        Fraction(2),
+        Fraction(3),
+        Fraction(4),
+    }
+)
 
 
 def _snap_to_grid(value) -> Fraction:
@@ -41,6 +58,69 @@ def _snap_measure_contents(measure: stream.Measure) -> None:
                 element.duration.quarterLength = _snap_to_grid(
                     element.duration.quarterLength
                 )
+
+
+def _fit_overfull_container(
+    container: stream.Stream,
+    expected_duration: Fraction,
+) -> bool:
+    """Shorten one likely misread duration and keep every note."""
+    events = list(container.notesAndRests)
+    actual_duration = Fraction(container.highestTime)
+    overflow = actual_duration - expected_duration
+
+    if overflow <= 0:
+        return True
+
+    def reduced_duration(element) -> Fraction:
+        return Fraction(element.duration.quarterLength) - overflow
+
+    dotted_candidates = [
+        element
+        for element in events
+        if element.duration.dots
+        and reduced_duration(element) in ALLOWED_DURATIONS
+        and reduced_duration(element)
+        == Fraction(element.duration.quarterLength) * Fraction(2, 3)
+    ]
+    candidate = dotted_candidates[-1] if dotted_candidates else None
+
+    if candidate is None:
+        first_outside = next(
+            (
+                index
+                for index, element in enumerate(events)
+                if Fraction(element.offset) >= expected_duration
+            ),
+            len(events),
+        )
+        candidates = events[:first_outside]
+        candidate = next(
+            (
+                element
+                for element in reversed(candidates)
+                if reduced_duration(element) in ALLOWED_DURATIONS
+            ),
+            None,
+        )
+
+    if candidate is None:
+        return False
+
+    old_end = (
+        Fraction(candidate.offset)
+        + Fraction(candidate.duration.quarterLength)
+    )
+    candidate.duration.quarterLength = reduced_duration(candidate)
+
+    for element in events:
+        if element is candidate:
+            continue
+
+        if Fraction(element.offset) >= old_end:
+            element.offset = Fraction(element.offset) - overflow
+
+    return True
 
 
 def _choose_measure_duration(
@@ -139,15 +219,33 @@ def correct_rhythm(score: stream.Score) -> list[str]:
             measure = measures[measure_index]
             _snap_measure_contents(measure)
 
-            actual_duration = Fraction(measure.highestTime)
+            voices = list(measure.getElementsByClass(stream.Voice))
+            containers = voices or [measure]
 
-            if actual_duration > expected_duration:
+            for voice_number, container in enumerate(containers, start=1):
+                actual_duration = Fraction(container.highestTime)
+
+                if actual_duration <= expected_duration:
+                    continue
+
                 overflow = actual_duration - expected_duration
-                warnings.append(
-                    f"{measure.number}마디 파트 {part_number}: "
-                    f"인식된 내용이 {float(overflow):g}박 깁니다. "
-                    "다음 마디 시작점은 공통 위치로 고정했습니다."
-                )
+
+                if _fit_overfull_container(
+                    container,
+                    expected_duration,
+                ):
+                    warnings.append(
+                        f"{measure.number}마디 파트 {part_number} "
+                        f"보이스 {voice_number}: "
+                        f"{float(overflow):g}박을 자동 보정했습니다."
+                    )
+                else:
+                    warnings.append(
+                        f"{measure.number}마디 파트 {part_number} "
+                        f"보이스 {voice_number}: "
+                        f"{float(overflow):g}박이 초과되지만 "
+                        "안전하게 보정할 수 없어 유지했습니다."
+                    )
 
             # The essential fix: both hands use exactly the same start.
             part.setElementOffset(measure, timeline)

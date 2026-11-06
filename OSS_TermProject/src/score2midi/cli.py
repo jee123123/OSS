@@ -10,7 +10,7 @@ from pathlib import Path
 from music21 import converter, instrument
 from PIL import Image
 
-from score2midi.preprocess import preprocess_page
+from score2midi.preprocess import preprocess_page, preprocess_pdf
 from score2midi.rhythm_corrector import correct_rhythm
 
 
@@ -54,26 +54,28 @@ def convert_pages(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="score2midi-") as temp_dir:
+        pages = []
+
         if pdf_inputs:
-            input_document = pdf_inputs[0].resolve()
+            pages = preprocess_pdf(pdf_inputs[0])
         else:
-            pages = []
             for image in images:
                 with Image.open(image) as source:
                     pages.append(preprocess_page(source))
 
-            input_document = Path(temp_dir) / "score.pdf"
-            try:
-                pages[0].save(
-                    input_document,
-                    "PDF",
-                    save_all=True,
-                    append_images=pages[1:],
-                    resolution=300,
-                )
-            finally:
-                for page in pages:
-                    page.close()
+        input_document = Path(temp_dir) / "score.tiff"
+        try:
+            pages[0].save(
+                input_document,
+                "TIFF",
+                save_all=True,
+                append_images=pages[1:],
+                compression="tiff_lzw",
+                dpi=(300, 300),
+            )
+        finally:
+            for page in pages:
+                page.close()
 
         result = subprocess.run(
             [
