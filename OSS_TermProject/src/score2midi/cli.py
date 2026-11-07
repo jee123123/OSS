@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -10,13 +11,82 @@ from pathlib import Path
 from music21 import converter, instrument
 from PIL import Image
 
+from score2midi.articulation import separate_repeated_notes
 from score2midi.preprocess import preprocess_page, preprocess_pdf
 from score2midi.rhythm_corrector import correct_rhythm
+from score2midi.rhythm_recovery import recover_missing_short_notes
+
+NO_TIME_OFFSET_PATTERN = re.compile(
+    r"\[[^\]]*#(?P<sheet>\d+)\].*?"
+    r"Measure\{#(?P<measure>\d+)P(?P<part>\d+)\}"
+    r".*?No timeOffset"
+)
+
+
+def _find_unplaced_chords(
+    log_text: str,
+) -> set[tuple[int, int, int]]:
+    return {
+        (
+            int(match.group("sheet")),
+            int(match.group("measure")),
+            int(match.group("part")),
+        )
+        for match in NO_TIME_OFFSET_PATTERN.finditer(log_text)
+    }
 
 
 def convert_score(image: Path, output: Path, audiveris: str) -> None:
     """Convert a score image to MIDI using Audiveris and music21."""
     convert_pages([image], output, audiveris)
+
+
+def _run_audiveris(
+    input_document: Path,
+    output_dir: Path,
+    audiveris_command: str,
+) -> tuple[Path, set[tuple[int, int, int]]]:
+    """Run Audiveris and return the generated MusicXML path."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    result = subprocess.run(
+        [
+            audiveris_command,
+            "-batch",
+            "-transcribe",
+            "-export",
+            "-output",
+            str(output_dir),
+            str(input_document),
+        ],
+        capture_output=True,
+        check=False,
+    )
+
+    stderr = result.stderr.decode(
+        "utf-8", errors="replace"
+    ).strip()
+    stdout = result.stdout.decode(
+        "utf-8", errors="replace"
+    ).strip()
+    log_text = f"{stdout}\n{stderr}"
+
+    if result.returncode != 0:
+        details = stderr or stdout or "자세한 오류 메시지가 없습니다."
+        raise RuntimeError(f"Audiveris 실행 실패:\n{details}")
+
+    candidates = (
+        list(output_dir.rglob("*.mxl"))
+        + list(output_dir.rglob("*.musicxml"))
+        + list(output_dir.rglob("*.xml"))
+    )
+
+    if not candidates:
+        raise FileNotFoundError(
+            "Audiveris가 MusicXML 파일을 만들지 않았습니다."
+        )
+
+    return candidates[0], _find_unplaced_chords(log_text)
 
 
 def convert_pages(
@@ -77,36 +147,95 @@ def convert_pages(
             for page in pages:
                 page.close()
 
-        result = subprocess.run(
-            [
-                audiveris_command,
-                "-batch",
-                "-transcribe",
-                "-export",
-                "-output",
-                temp_dir,
-                str(input_document),
-            ],
-            capture_output=True,
-            check=False,
+        primary_musicxml, unplaced_chords = _run_audiveris(
+            input_document,
+            Path(temp_dir) / "primary",
+            audiveris_command,
         )
+        score = converter.parse(str(primary_musicxml))
+        conversion_warnings: list[str] = []
+        review_warnings: list[str] = []
 
-        if result.returncode != 0:
-            stderr = result.stderr.decode("utf-8", errors="replace").strip()
-            stdout = result.stdout.decode("utf-8", errors="replace").strip()
-            details = stderr or stdout or "자세한 오류 메시지가 없습니다."
-            raise RuntimeError(f"Audiveris 실행 실패:\n{details}")
+        for sheet, measure, part_number in sorted(unplaced_chords):
+            if part_number == 1:
+                part_name = "오른손"
+            elif part_number == 2:
+                part_name = "왼손"
+            else:
+                part_name = f"파트 {part_number}"
 
-        candidates = (
-            list(Path(temp_dir).rglob("*.mxl"))
-            + list(Path(temp_dir).rglob("*.musicxml"))
-            + list(Path(temp_dir).rglob("*.xml"))
-        )
-        if not candidates:
-            raise FileNotFoundError("Audiveris가 MusicXML 파일을 만들지 않았습니다.")
+            review_warnings.append(
+                f"{sheet}쪽 내 {measure}번째 마디 {part_name}: "
+                "음표의 박자 위치를 정하지 못해 일부 음이 "
+                "누락됐을 수 있습니다."
+            )
 
-        score = converter.parse(str(candidates[0]))
-        rhythm_warnings = correct_rhythm(score)
+        if pdf_inputs:
+            try:
+                high_resolution_pages = preprocess_pdf(
+                    pdf_inputs[0],
+                    dpi=400,
+                )
+                high_resolution_document = (
+                    Path(temp_dir) / "score-400dpi.tiff"
+                )
+
+                try:
+                    high_resolution_pages[0].save(
+                        high_resolution_document,
+                        "TIFF",
+                        save_all=True,
+                        append_images=high_resolution_pages[1:],
+                        compression="tiff_lzw",
+                        dpi=(400, 400),
+                    )
+                finally:
+                    for page in high_resolution_pages:
+                        page.close()
+
+                high_resolution_musicxml, _ = _run_audiveris(
+                    high_resolution_document,
+                    Path(temp_dir) / "high-resolution",
+                    audiveris_command,
+                )
+                high_resolution_score = converter.parse(
+                    str(high_resolution_musicxml)
+                )
+                conversion_warnings.extend(
+                    recover_missing_short_notes(
+                        score,
+                        high_resolution_score,
+                    )
+                )
+            except (FileNotFoundError, RuntimeError, OSError) as error:
+                conversion_warnings.append(
+                    "400DPI 보조 인식은 실패했지만 기본 변환은 "
+                    f"계속했습니다: {error}"
+                )
+
+            try:
+                alternative_musicxml, _ = _run_audiveris(
+                    pdf_inputs[0].resolve(),
+                    Path(temp_dir) / "alternative",
+                    audiveris_command,
+                )
+                alternative_score = converter.parse(
+                    str(alternative_musicxml)
+                )
+                conversion_warnings.extend(
+                    recover_missing_short_notes(
+                        score,
+                        alternative_score,
+                    )
+                )
+            except (FileNotFoundError, RuntimeError, OSError) as error:
+                conversion_warnings.append(
+                    "원본 PDF 보조 인식은 실패했지만 기본 변환은 "
+                    f"계속했습니다: {error}"
+                )
+
+        conversion_warnings.extend(correct_rhythm(score))
+        conversion_warnings.extend(separate_repeated_notes(score))
         for part in score.parts:
             detected_instruments = list(
                 part.recurse().getElementsByClass(instrument.Instrument)
@@ -118,9 +247,15 @@ def convert_pages(
                 part.insert(0, instrument.Piano())
         score.write("midi", fp=str(output))
 
-        if rhythm_warnings:
+        if conversion_warnings:
             output.with_suffix(".rhythm.txt").write_text(
-                "\n".join(rhythm_warnings),
+                "\n".join(conversion_warnings),
+                encoding="utf-8",
+            )
+
+        if review_warnings:
+            output.with_suffix(".review.txt").write_text(
+                "\n".join(review_warnings),
                 encoding="utf-8",
             )
 

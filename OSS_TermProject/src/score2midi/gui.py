@@ -268,7 +268,22 @@ class Score2MidiWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.status_label.setText(f"완료: {output}")
-        QMessageBox.information(self, "변환 완료", f"MIDI 파일을 저장했습니다.\n{output}")
+        review_path = Path(output).with_suffix(".review.txt")
+
+        if review_path.is_file():
+            details = review_path.read_text(encoding="utf-8")
+            QMessageBox.warning(
+                self,
+                "변환 완료 - 검토 필요",
+                "MIDI 파일은 저장됐지만 인식이 불확실한 "
+                f"마디가 있습니다.\n\n{details}",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "변환 완료",
+                f"MIDI 파일을 저장했습니다.\n{output}",
+            )
 
     def conversion_failed(self, error: str) -> None:
         self.progress.setRange(0, 100)

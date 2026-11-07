@@ -27,9 +27,7 @@ ALLOWED_DURATIONS = frozenset(
 
 
 def _snap_to_grid(value) -> Fraction:
-    """Snap only very small recognition errors to common note grids."""
     original = Fraction(value)
-
     candidates = [
         Fraction(round(float(original) * divisor), divisor)
         for divisor in GRID_DIVISORS
@@ -46,7 +44,6 @@ def _snap_to_grid(value) -> Fraction:
 
 
 def _snap_measure_contents(measure: stream.Measure) -> None:
-    """Correct tiny offset and duration errors without rewriting notes."""
     voices = list(measure.getElementsByClass(stream.Voice))
     containers = voices or [measure]
 
@@ -64,7 +61,6 @@ def _fit_overfull_container(
     container: stream.Stream,
     expected_duration: Fraction,
 ) -> bool:
-    """Shorten one likely misread duration and keep every note."""
     events = list(container.notesAndRests)
     actual_duration = Fraction(container.highestTime)
     overflow = actual_duration - expected_duration
@@ -128,12 +124,10 @@ def _choose_measure_duration(
     measure_index: int,
     warnings: list[str],
 ) -> Fraction:
-    """Choose one shared duration for the same measure in every part."""
     bar_durations = [
         Fraction(measure.barDuration.quarterLength)
         for measure in measures
     ]
-
     counts = Counter(bar_durations)
     duration = max(
         counts,
@@ -151,7 +145,6 @@ def _choose_measure_duration(
             f"{float(duration):g}박으로 통일했습니다."
         )
 
-    # Anacrusis/pickup measure is used only when every part agrees.
     if measure_index == 0:
         recognized_durations = [
             bar_duration - Fraction(measure.paddingLeft or 0)
@@ -177,20 +170,16 @@ def _choose_measure_duration(
 
 
 def correct_rhythm(score: stream.Score) -> list[str]:
-    """Place every part's measures on one shared timeline."""
     warnings: list[str] = []
     parts = list(score.parts)
-
     part_measures = [
         list(part.getElementsByClass(stream.Measure))
         for part in parts
     ]
-
     measure_count = max(
         (len(measures) for measures in part_measures),
         default=0,
     )
-
     timeline = Fraction(0)
 
     for measure_index in range(measure_count):
@@ -218,7 +207,6 @@ def correct_rhythm(score: stream.Score) -> list[str]:
 
             measure = measures[measure_index]
             _snap_measure_contents(measure)
-
             voices = list(measure.getElementsByClass(stream.Voice))
             containers = voices or [measure]
 
@@ -247,7 +235,6 @@ def correct_rhythm(score: stream.Score) -> list[str]:
                         "안전하게 보정할 수 없어 유지했습니다."
                     )
 
-            # The essential fix: both hands use exactly the same start.
             part.setElementOffset(measure, timeline)
 
         timeline += expected_duration

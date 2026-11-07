@@ -27,7 +27,10 @@ def preprocess_page(source: Image.Image) -> Image.Image:
     return page
 
 
-def preprocess_pdf(source: Path) -> list[Image.Image]:
+def preprocess_pdf(
+    source: Path,
+    dpi: int = PDF_RENDER_DPI,
+) -> list[Image.Image]:
     """Render PDF pages without destructive sharpening."""
     document = pdfium.PdfDocument(source)
     pages: list[Image.Image] = []
@@ -35,7 +38,7 @@ def preprocess_pdf(source: Path) -> list[Image.Image]:
     try:
         for page_index in range(len(document)):
             page = document[page_index]
-            bitmap = page.render(scale=PDF_RENDER_DPI / 72)
+            bitmap = page.render(scale=dpi / 72)
             rendered = bitmap.to_pil()
 
             try:
