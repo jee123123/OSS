@@ -12,6 +12,7 @@ from music21 import converter, instrument
 from PIL import Image
 
 from score2midi.articulation import separate_repeated_notes
+from score2midi.beam_recovery import recover_unplaced_beamed_notes
 from score2midi.preprocess import preprocess_page, preprocess_pdf
 from score2midi.rhythm_corrector import correct_rhythm
 from score2midi.rhythm_recovery import recover_missing_short_notes
@@ -156,20 +157,6 @@ def convert_pages(
         conversion_warnings: list[str] = []
         review_warnings: list[str] = []
 
-        for sheet, measure, part_number in sorted(unplaced_chords):
-            if part_number == 1:
-                part_name = "오른손"
-            elif part_number == 2:
-                part_name = "왼손"
-            else:
-                part_name = f"파트 {part_number}"
-
-            review_warnings.append(
-                f"{sheet}쪽 내 {measure}번째 마디 {part_name}: "
-                "음표의 박자 위치를 정하지 못해 일부 음이 "
-                "누락됐을 수 있습니다."
-            )
-
         if pdf_inputs:
             try:
                 high_resolution_pages = preprocess_pdf(
@@ -234,6 +221,36 @@ def convert_pages(
                     f"계속했습니다: {error}"
                 )
 
+        try:
+            beam_warnings, recovered_chords = recover_unplaced_beamed_notes(
+                score,
+                input_document,
+                primary_musicxml,
+                unplaced_chords,
+            )
+            conversion_warnings.extend(beam_warnings)
+        except (OSError, ValueError, IndexError, StopIteration) as error:
+            recovered_chords = set()
+            conversion_warnings.append(
+                f"빔 음표 보조 복구를 건너뛰었습니다: {error}"
+            )
+
+        for sheet, measure, part_number in sorted(
+            unplaced_chords - recovered_chords
+        ):
+            if part_number == 1:
+                part_name = "오른손"
+            elif part_number == 2:
+                part_name = "왼손"
+            else:
+                part_name = f"파트 {part_number}"
+
+            review_warnings.append(
+                f"{sheet}쪽 내 {measure}번째 마디 {part_name}: "
+                "음표의 박자 위치를 정하지 못해 일부 음이 "
+                "누락됐을 수 있습니다."
+            )
+
         conversion_warnings.extend(correct_rhythm(score))
         conversion_warnings.extend(separate_repeated_notes(score))
         for part in score.parts:
@@ -247,15 +264,10 @@ def convert_pages(
                 part.insert(0, instrument.Piano())
         score.write("midi", fp=str(output))
 
-        if conversion_warnings:
-            output.with_suffix(".rhythm.txt").write_text(
-                "\n".join(conversion_warnings),
-                encoding="utf-8",
-            )
-
-        if review_warnings:
-            output.with_suffix(".review.txt").write_text(
-                "\n".join(review_warnings),
+        details = conversion_warnings + review_warnings
+        if details:
+            output.with_suffix(".txt").write_text(
+                "\n".join(details),
                 encoding="utf-8",
             )
 

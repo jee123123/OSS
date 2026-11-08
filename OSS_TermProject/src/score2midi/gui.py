@@ -42,7 +42,13 @@ class ConversionWorker(QThread):
         try:
             convert_pages(self.images, self.output, self.audiveris)
         except Exception as error:
-            self.failed.emit(str(error))
+            log_path = self.output.with_suffix(".txt")
+            try:
+                log_path.write_text(str(error), encoding="utf-8")
+            except OSError:
+                self.failed.emit(str(error))
+            else:
+                self.failed.emit(f"자세한 내용은 {log_path}를 참고하세요.")
         else:
             self.succeeded.emit(str(self.output))
 
@@ -268,22 +274,12 @@ class Score2MidiWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.status_label.setText(f"완료: {output}")
-        review_path = Path(output).with_suffix(".review.txt")
+        details_path = Path(output).with_suffix(".txt")
 
-        if review_path.is_file():
-            details = review_path.read_text(encoding="utf-8")
-            QMessageBox.warning(
-                self,
-                "변환 완료 - 검토 필요",
-                "MIDI 파일은 저장됐지만 인식이 불확실한 "
-                f"마디가 있습니다.\n\n{details}",
-            )
-        else:
-            QMessageBox.information(
-                self,
-                "변환 완료",
-                f"MIDI 파일을 저장했습니다.\n{output}",
-            )
+        message = f"MIDI 파일로 변환했습니다.\n{output}"
+        if details_path.is_file():
+            message += f"\n\n세부 내용은 {details_path.name}을 참고하세요."
+        QMessageBox.information(self, "변환 완료", message)
 
     def conversion_failed(self, error: str) -> None:
         self.progress.setRange(0, 100)
