@@ -2,7 +2,10 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from score2midi.preprocess import extend_short_final_system
+from score2midi.preprocess import (
+    extend_short_final_system,
+    preprocess_page,
+)
 
 
 class ShortFinalSystemTest(unittest.TestCase):
@@ -31,6 +34,15 @@ class ShortFinalSystemTest(unittest.TestCase):
         result = extend_short_final_system(page)
 
         self.assertIs(result, page)
+
+    def test_primary_preprocessing_does_not_extend_final_system(self) -> None:
+        page = self._page(True)
+
+        primary = preprocess_page(page)
+        alternative = preprocess_page(page, extend_final_system=True)
+
+        self.assertGreater(primary.getpixel((2220, 2100)), 128)
+        self.assertLess(alternative.getpixel((2220, 2100)), 128)
 
 
 if __name__ == "__main__":

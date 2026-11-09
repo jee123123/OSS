@@ -169,10 +169,14 @@ def extend_short_final_system(page: Image.Image) -> Image.Image:
     return corrected
 
 
-def preprocess_page(source: Image.Image) -> Image.Image:
+def preprocess_page(
+    source: Image.Image,
+    extend_final_system: bool = False,
+) -> Image.Image:
     """Preserve score symbols while ensuring a usable resolution."""
     page = ImageOps.grayscale(source)
-    page = extend_short_final_system(page)
+    if extend_final_system:
+        page = extend_short_final_system(page)
 
     longest_edge = max(page.size)
     if longest_edge < MIN_PAGE_LONG_EDGE:
@@ -191,6 +195,7 @@ def preprocess_page(source: Image.Image) -> Image.Image:
 def preprocess_pdf(
     source: Path,
     dpi: int = PDF_RENDER_DPI,
+    extend_final_system: bool = False,
 ) -> list[Image.Image]:
     """Render PDF pages without destructive sharpening."""
     document = pdfium.PdfDocument(source)
@@ -203,7 +208,9 @@ def preprocess_pdf(
             rendered = bitmap.to_pil()
 
             try:
-                pages.append(preprocess_page(rendered))
+                pages.append(
+                    preprocess_page(rendered, extend_final_system)
+                )
             finally:
                 rendered.close()
                 bitmap.close()

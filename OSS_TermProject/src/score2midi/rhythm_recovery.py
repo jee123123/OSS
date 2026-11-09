@@ -85,4 +85,16 @@ def recover_missing_short_notes(
                 f"{recovered_count}개를 복구했습니다."
             )
 
+        for alternative_measure in alternative_measures[
+            len(primary_measures):
+        ]:
+            if _note_event_count(alternative_measure) == 0:
+                continue
+
+            primary_part.append(deepcopy(alternative_measure))
+            warnings.append(
+                f"{alternative_measure.number}마디 파트 {part_number}: "
+                "보조 인식 결과에서 누락된 마지막 마디를 복구했습니다."
+            )
+
     return warnings

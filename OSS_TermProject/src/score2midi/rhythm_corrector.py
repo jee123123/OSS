@@ -57,6 +57,13 @@ def _snap_measure_contents(measure: stream.Measure) -> None:
                 )
 
 
+def _contains_tuplets(measure: stream.Measure) -> bool:
+    return any(
+        element.duration.tuplets
+        for element in measure.recurse().notesAndRests
+    )
+
+
 def _fit_overfull_container(
     container: stream.Stream,
     expected_duration: Fraction,
@@ -206,6 +213,14 @@ def correct_rhythm(score: stream.Score) -> list[str]:
                 continue
 
             measure = measures[measure_index]
+            if _contains_tuplets(measure):
+                warnings.append(
+                    f"{measure.number}마디 파트 {part_number}: "
+                    "셋잇단음표가 있어 자동 리듬 보정을 건너뛰었습니다."
+                )
+                part.setElementOffset(measure, timeline)
+                continue
+
             _snap_measure_contents(measure)
             voices = list(measure.getElementsByClass(stream.Voice))
             containers = voices or [measure]

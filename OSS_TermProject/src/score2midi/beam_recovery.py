@@ -1,5 +1,6 @@
 """Detect beamed black notes that OMR may omit."""
 
+from copy import deepcopy
 from dataclasses import dataclass
 from fractions import Fraction
 from statistics import median
@@ -678,6 +679,25 @@ def _staff_bounds(
     return max(_bands(mask, 255), key=lambda band: band[1] - band[0])
 
 
+def _has_complete_timeline(
+    container: stream.Stream,
+    bar_duration: Fraction,
+) -> bool:
+    intervals: dict[Fraction, Fraction] = {}
+    for event in container.notesAndRests:
+        start = Fraction(event.offset)
+        end = start + Fraction(event.duration.quarterLength)
+        intervals[start] = max(intervals.get(start, start), end)
+
+    cursor = Fraction(0)
+    for start, end in sorted(intervals.items()):
+        if start != cursor:
+            return False
+        cursor = end
+
+    return cursor == bar_duration
+
+
 def recover_unplaced_beamed_notes(
     score: stream.Score,
     page_document: Path,
@@ -726,6 +746,15 @@ def recover_unplaced_beamed_notes(
             measure = part.measure(region.global_number)
             if measure is None:
                 continue
+            if any(
+                event.duration.tuplets
+                for event in measure.recurse().notesAndRests
+            ):
+                continue
+
+            voices = list(measure.getElementsByClass(stream.Voice))
+            if len(voices) > 1:
+                continue
 
             system_regions = [
                 item
@@ -768,10 +797,9 @@ def recover_unplaced_beamed_notes(
             anchors = _measure_anchors(measure)
             x_tolerance = spacing / scale * 0.65
             bar_duration = Fraction(measure.barDuration.quarterLength)
-            container = next(
-                iter(measure.getElementsByClass(stream.Voice)),
-                measure,
-            )
+            container = voices[0] if voices else measure
+            original_measure = deepcopy(measure)
+            measure_offset = measure.offset
             added = 0
             adjusted = 0
 
@@ -841,6 +869,11 @@ def recover_unplaced_beamed_notes(
                     added += 1
 
             if added or adjusted:
+                if not _has_complete_timeline(container, bar_duration):
+                    part.remove(measure)
+                    part.insert(measure_offset, original_measure)
+                    continue
+
                 recovered.add(key)
                 warnings.append(
                     f"{page_number}쪽 {local_number}번째 마디 "
