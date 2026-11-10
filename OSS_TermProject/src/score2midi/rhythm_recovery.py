@@ -5,7 +5,7 @@ from fractions import Fraction
 
 from music21 import stream
 
-SHORT_NOTE_LIMIT = Fraction(1, 2)
+SHORT_NOTE_LIMIT = Fraction(2, 3)
 MIN_SHORT_NOTE_GAIN = 1
 MAX_EXTRA_RHYTHM_ERROR = Fraction(1, 2)
 
@@ -48,6 +48,8 @@ def recover_missing_short_notes(
             primary_measures,
             alternative_measures,
         ):
+            primary_count = _note_event_count(primary_measure)
+            alternative_count = _note_event_count(alternative_measure)
             recovered_count = (
                 _short_note_count(alternative_measure)
                 - _short_note_count(primary_measure)
@@ -55,8 +57,7 @@ def recover_missing_short_notes(
 
             if (
                 recovered_count < MIN_SHORT_NOTE_GAIN
-                or _note_event_count(alternative_measure)
-                <= _note_event_count(primary_measure)
+                or alternative_count < primary_count
             ):
                 continue
 
@@ -64,6 +65,13 @@ def recover_missing_short_notes(
             alternative_error = _measure_rhythm_error(
                 alternative_measure
             )
+
+            if (
+                alternative_count == primary_count
+                and alternative_error >= primary_error
+            ):
+                continue
+
             allowed_extra_error = (
                 Fraction(0)
                 if recovered_count == 1
