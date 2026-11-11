@@ -7,29 +7,13 @@ if __name__ == '__main__':
 
     # Train a model
     # TODO
-    #1.GaussianNB
-    #model = naive_bayes.GaussianNB(
-    #    var_smoothing = 1e-06
-    #)
-
-    #2. DecisionTree
-    #model = tree.DecisionTreeClassifier(
-    #    max_depth = 7,
-    #    min_samples_split = 10,
-    #    min_samples_leaf = 20,
-    #    criterion = 'entropy'
-    #)
-
-    #3. RandomForest
-    model = ensemble.RandomForestClassifier(
-        n_estimators=300,
-        max_features='sqrt',
-        max_depth=5,
-        min_samples_leaf=5,
-        min_samples_split=7,
-        random_state=42
+    model = ensemble.AdaBoostClassifier(
+        estimator=tree.DecisionTreeClassifier(max_depth=2, min_samples_leaf=4),
+        n_estimators=250,
+        learning_rate=1.2,
+        random_state=42,
     )
-    #model = svm.SVC() - 11
+    
     cv_results = model_selection.cross_validate(model, wdbc.data, wdbc.target, cv=5, return_train_score=True)
 
     # Evaluate the model
