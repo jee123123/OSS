@@ -328,6 +328,7 @@ def convert_pages(
                     detected.midiProgram = 0
             else:
                 part.insert(0, instrument.Piano())
+        score.write("musicxml", fp=str(output.with_suffix(".musicxml")))
         score.write("midi", fp=str(output))
 
         details = conversion_warnings + review_warnings
@@ -364,6 +365,10 @@ def main() -> int:
         return 1
 
     print(f"MIDI 파일을 저장했습니다: {args.output}")
+    print(
+        "MusicXML 파일을 저장했습니다: "
+        f"{args.output.with_suffix('.musicxml')}"
+    )
     return 0
 
 

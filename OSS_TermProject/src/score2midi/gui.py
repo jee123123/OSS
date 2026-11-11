@@ -262,12 +262,12 @@ class Score2MidiWindow(QMainWindow):
         output = self.output_dir / filename
         original_stem = output.stem
         suffix = 2
-        while output.exists():
+        while output.exists() or output.with_suffix(".musicxml").exists():
             output = output.with_name(f"{original_stem}_{suffix}.mid")
             suffix += 1
 
         self.progress.setRange(0, 0)
-        self.status_label.setText("여러 페이지를 하나의 MIDI로 변환 중…")
+        self.status_label.setText("MIDI와 MusicXML로 변환 중…")
         self.set_controls_enabled(False)
         bpm = self.bpm_input.value()
         self.settings.setValue("bpm", bpm)
@@ -301,9 +301,14 @@ class Score2MidiWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.status_label.setText(f"완료: {output}")
+        musicxml_path = Path(output).with_suffix(".musicxml")
         details_path = Path(output).with_suffix(".txt")
 
-        message = f"MIDI 파일로 변환했습니다.\n{output}"
+        message = (
+            f"MIDI와 MusicXML 파일로 변환했습니다.\n\n"
+            f"MIDI: {output}\n"
+            f"MusicXML: {musicxml_path}"
+        )
         if details_path.is_file():
             message += f"\n\n세부 내용은 {details_path.name}을 참고하세요."
         QMessageBox.information(self, "변환 완료", message)
