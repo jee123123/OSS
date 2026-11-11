@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -32,17 +33,35 @@ class ConversionWorker(QThread):
     succeeded = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, images: list[Path], output: Path, audiveris: str):
+    def __init__(
+        self,
+        images: list[Path],
+        output: Path,
+        audiveris: str,
+        bpm: int,
+    ):
         super().__init__()
         self.images = images
         self.output = output
         self.audiveris = audiveris
+        self.bpm = bpm
 
     def run(self) -> None:
         try:
-            convert_pages(self.images, self.output, self.audiveris)
+            convert_pages(
+                self.images,
+                self.output,
+                self.audiveris,
+                self.bpm,
+            )
         except Exception as error:
-            self.failed.emit(str(error))
+            log_path = self.output.with_suffix(".txt")
+            try:
+                log_path.write_text(str(error), encoding="utf-8")
+            except OSError:
+                self.failed.emit(str(error))
+            else:
+                self.failed.emit(f"자세한 내용은 {log_path}를 참고하세요.")
         else:
             self.succeeded.emit(str(self.output))
 
@@ -63,6 +82,10 @@ class Score2MidiWindow(QMainWindow):
         self.progress = QProgressBar()
         self.status_label = QLabel("대기 중")
         self.output_name = QLineEdit("score.mid")
+        self.bpm_input = QSpinBox()
+        self.bpm_input.setRange(20, 300)
+        self.bpm_input.setValue(int(self.settings.value("bpm", 120)))
+        self.bpm_input.setSuffix(" BPM")
         self.audiveris_label = QLabel(f"Audiveris: {self.audiveris}")
         self.output_label = QLabel(f"저장 위치: {self.output_dir}")
 
@@ -98,6 +121,8 @@ class Score2MidiWindow(QMainWindow):
         output_name_layout = QHBoxLayout()
         output_name_layout.addWidget(QLabel("결과 파일 이름:"))
         output_name_layout.addWidget(self.output_name)
+        output_name_layout.addWidget(QLabel("BPM:"))
+        output_name_layout.addWidget(self.bpm_input)
 
         buttons = QHBoxLayout()
         for button in (
@@ -244,8 +269,15 @@ class Score2MidiWindow(QMainWindow):
         self.progress.setRange(0, 0)
         self.status_label.setText("여러 페이지를 하나의 MIDI로 변환 중…")
         self.set_controls_enabled(False)
+        bpm = self.bpm_input.value()
+        self.settings.setValue("bpm", bpm)
 
-        self.worker = ConversionWorker(images, output, self.audiveris)
+        self.worker = ConversionWorker(
+            images,
+            output,
+            self.audiveris,
+            bpm,
+        )
         self.worker.succeeded.connect(self.conversion_succeeded)
         self.worker.failed.connect(self.conversion_failed)
         self.worker.finished.connect(lambda: self.set_controls_enabled(True))
@@ -261,6 +293,7 @@ class Score2MidiWindow(QMainWindow):
             self.output_button,
             self.convert_button,
             self.output_name,
+            self.bpm_input,
         ):
             widget.setEnabled(enabled)
 
@@ -268,7 +301,12 @@ class Score2MidiWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.status_label.setText(f"완료: {output}")
-        QMessageBox.information(self, "변환 완료", f"MIDI 파일을 저장했습니다.\n{output}")
+        details_path = Path(output).with_suffix(".txt")
+
+        message = f"MIDI 파일로 변환했습니다.\n{output}"
+        if details_path.is_file():
+            message += f"\n\n세부 내용은 {details_path.name}을 참고하세요."
+        QMessageBox.information(self, "변환 완료", message)
 
     def conversion_failed(self, error: str) -> None:
         self.progress.setRange(0, 100)

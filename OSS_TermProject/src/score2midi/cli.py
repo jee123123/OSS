@@ -1,27 +1,120 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from music21 import converter, instrument
-from PIL import Image
+from music21 import converter, instrument, tempo
+from PIL import Image, ImageChops
 
-MIN_PAGE_LONG_EDGE = 3000
+from score2midi.articulation import separate_repeated_notes
+from score2midi.beam_recovery import recover_unplaced_beamed_notes
+from score2midi.preprocess import (
+    preprocess_page,
+    preprocess_pdf,
+)
+from score2midi.rhythm_corrector import correct_rhythm
+from score2midi.rhythm_recovery import recover_missing_short_notes
+
+NO_TIME_OFFSET_PATTERN = re.compile(
+    r"\[[^\]]*#(?P<sheet>\d+)\].*?"
+    r"Measure\{#(?P<measure>\d+)P(?P<part>\d+)\}"
+    r".*?No timeOffset"
+)
 
 
-def convert_score(image: Path, output: Path, audiveris: str) -> None:
+def _find_unplaced_chords(
+    log_text: str,
+) -> set[tuple[int, int, int]]:
+    return {
+        (
+            int(match.group("sheet")),
+            int(match.group("measure")),
+            int(match.group("part")),
+        )
+        for match in NO_TIME_OFFSET_PATTERN.finditer(log_text)
+    }
+
+
+def _set_tempo(score, bpm: int) -> None:
+    if not 20 <= bpm <= 300:
+        raise ValueError("BPM은 20에서 300 사이여야 합니다.")
+
+    for mark in list(
+        score.recurse().getElementsByClass(tempo.MetronomeMark)
+    ):
+        if mark.activeSite is not None:
+            mark.activeSite.remove(mark)
+    score.insert(0, tempo.MetronomeMark(number=bpm))
+
+
+def convert_score(
+    image: Path,
+    output: Path,
+    audiveris: str,
+    bpm: int = 120,
+) -> None:
     """Convert a score image to MIDI using Audiveris and music21."""
-    convert_pages([image], output, audiveris)
+    convert_pages([image], output, audiveris, bpm)
+
+
+def _run_audiveris(
+    input_document: Path,
+    output_dir: Path,
+    audiveris_command: str,
+) -> tuple[Path, set[tuple[int, int, int]]]:
+    """Run Audiveris and return the generated MusicXML path."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    result = subprocess.run(
+        [
+            audiveris_command,
+            "-batch",
+            "-transcribe",
+            "-export",
+            "-output",
+            str(output_dir),
+            str(input_document),
+        ],
+        capture_output=True,
+        check=False,
+    )
+
+    stderr = result.stderr.decode(
+        "utf-8", errors="replace"
+    ).strip()
+    stdout = result.stdout.decode(
+        "utf-8", errors="replace"
+    ).strip()
+    log_text = f"{stdout}\n{stderr}"
+
+    if result.returncode != 0:
+        details = stderr or stdout or "자세한 오류 메시지가 없습니다."
+        raise RuntimeError(f"Audiveris 실행 실패:\n{details}")
+
+    candidates = (
+        list(output_dir.rglob("*.mxl"))
+        + list(output_dir.rglob("*.musicxml"))
+        + list(output_dir.rglob("*.xml"))
+    )
+
+    if not candidates:
+        raise FileNotFoundError(
+            "Audiveris가 MusicXML 파일을 만들지 않았습니다."
+        )
+
+    return candidates[0], _find_unplaced_chords(log_text)
 
 
 def convert_pages(
     images: list[Path],
     output: Path,
     audiveris: str,
+    bpm: int = 120,
 ) -> None:
     """Convert ordered score pages into one MIDI file."""
     if not images:
@@ -53,67 +146,179 @@ def convert_pages(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="score2midi-") as temp_dir:
+        pages = []
+        extended_pages = []
+
         if pdf_inputs:
-            input_document = pdf_inputs[0].resolve()
+            pages = preprocess_pdf(pdf_inputs[0])
+            extended_pages = preprocess_pdf(
+                pdf_inputs[0],
+                extend_final_system=True,
+            )
         else:
-            pages = []
             for image in images:
                 with Image.open(image) as source:
-                    page = source.convert("RGB")
-                    longest_edge = max(page.size)
-                    if longest_edge < MIN_PAGE_LONG_EDGE:
-                        scale = MIN_PAGE_LONG_EDGE / longest_edge
-                        page = page.resize(
-                            (
-                                round(page.width * scale),
-                                round(page.height * scale),
-                            ),
-                            Image.Resampling.LANCZOS,
+                    pages.append(preprocess_page(source))
+                    extended_pages.append(
+                        preprocess_page(
+                            source,
+                            extend_final_system=True,
                         )
-                    pages.append(page)
+                    )
 
-            input_document = Path(temp_dir) / "score.pdf"
-            try:
-                pages[0].save(
-                    input_document,
-                    "PDF",
+        extension_changed = any(
+            ImageChops.difference(primary, extended).getbbox()
+            is not None
+            for primary, extended in zip(pages, extended_pages)
+        )
+
+        input_document = Path(temp_dir) / "score.tiff"
+        extended_document = Path(temp_dir) / "score-extended.tiff"
+        try:
+            pages[0].save(
+                input_document,
+                "TIFF",
+                save_all=True,
+                append_images=pages[1:],
+                compression="tiff_lzw",
+                dpi=(300, 300),
+            )
+            if extension_changed:
+                extended_pages[0].save(
+                    extended_document,
+                    "TIFF",
                     save_all=True,
-                    append_images=pages[1:],
-                    resolution=300,
+                    append_images=extended_pages[1:],
+                    compression="tiff_lzw",
+                    dpi=(300, 300),
                 )
-            finally:
-                for page in pages:
-                    page.close()
+        finally:
+            for page in pages + extended_pages:
+                page.close()
 
-        result = subprocess.run(
-            [
-                audiveris_command,
-                "-batch",
-                "-transcribe",
-                "-export",
-                "-output",
-                temp_dir,
-                str(input_document),
-            ],
-            capture_output=True,
-            check=False,
+        primary_musicxml, unplaced_chords = _run_audiveris(
+            input_document,
+            Path(temp_dir) / "primary",
+            audiveris_command,
         )
+        score = converter.parse(str(primary_musicxml))
+        conversion_warnings: list[str] = []
+        review_warnings: list[str] = []
 
-        if result.returncode != 0:
-            stderr = result.stderr.decode("utf-8", errors="replace").strip()
-            stdout = result.stdout.decode("utf-8", errors="replace").strip()
-            details = stderr or stdout or "자세한 오류 메시지가 없습니다."
-            raise RuntimeError(f"Audiveris 실행 실패:\n{details}")
+        if extension_changed:
+            try:
+                extended_musicxml, _ = _run_audiveris(
+                    extended_document,
+                    Path(temp_dir) / "extended",
+                    audiveris_command,
+                )
+                extended_score = converter.parse(str(extended_musicxml))
+                conversion_warnings.extend(
+                    recover_missing_short_notes(score, extended_score)
+                )
+            except (FileNotFoundError, RuntimeError, OSError) as error:
+                conversion_warnings.append(
+                    "마지막 오선 보조 인식은 실패했지만 기본 변환은 "
+                    f"계속했습니다: {error}"
+                )
 
-        candidates = (
-            list(Path(temp_dir).rglob("*.mxl"))
-            + list(Path(temp_dir).rglob("*.musicxml"))
-            + list(Path(temp_dir).rglob("*.xml"))
-        )
-        if not candidates:
-            raise FileNotFoundError("Audiveris가 MusicXML 파일을 만들지 않았습니다.")
+        if pdf_inputs:
+            try:
+                high_resolution_pages = preprocess_pdf(
+                    pdf_inputs[0],
+                    dpi=400,
+                )
+                high_resolution_document = (
+                    Path(temp_dir) / "score-400dpi.tiff"
+                )
 
-        score = converter.parse(str(candidates[0]))
+                try:
+                    high_resolution_pages[0].save(
+                        high_resolution_document,
+                        "TIFF",
+                        save_all=True,
+                        append_images=high_resolution_pages[1:],
+                        compression="tiff_lzw",
+                        dpi=(400, 400),
+                    )
+                finally:
+                    for page in high_resolution_pages:
+                        page.close()
+
+                high_resolution_musicxml, _ = _run_audiveris(
+                    high_resolution_document,
+                    Path(temp_dir) / "high-resolution",
+                    audiveris_command,
+                )
+                high_resolution_score = converter.parse(
+                    str(high_resolution_musicxml)
+                )
+                conversion_warnings.extend(
+                    recover_missing_short_notes(
+                        score,
+                        high_resolution_score,
+                    )
+                )
+            except (FileNotFoundError, RuntimeError, OSError) as error:
+                conversion_warnings.append(
+                    "400DPI 보조 인식은 실패했지만 기본 변환은 "
+                    f"계속했습니다: {error}"
+                )
+
+            try:
+                alternative_musicxml, _ = _run_audiveris(
+                    pdf_inputs[0].resolve(),
+                    Path(temp_dir) / "alternative",
+                    audiveris_command,
+                )
+                alternative_score = converter.parse(
+                    str(alternative_musicxml)
+                )
+                conversion_warnings.extend(
+                    recover_missing_short_notes(
+                        score,
+                        alternative_score,
+                    )
+                )
+            except (FileNotFoundError, RuntimeError, OSError) as error:
+                conversion_warnings.append(
+                    "원본 PDF 보조 인식은 실패했지만 기본 변환은 "
+                    f"계속했습니다: {error}"
+                )
+
+        try:
+            beam_warnings, recovered_chords = recover_unplaced_beamed_notes(
+                score,
+                input_document,
+                primary_musicxml,
+                unplaced_chords,
+            )
+            conversion_warnings.extend(beam_warnings)
+        except (OSError, ValueError, IndexError, StopIteration) as error:
+            recovered_chords = set()
+            conversion_warnings.append(
+                f"빔 음표 보조 복구를 건너뛰었습니다: {error}"
+            )
+
+        for sheet, measure, part_number in sorted(
+            unplaced_chords - recovered_chords
+        ):
+            if part_number == 1:
+                part_name = "오른손"
+            elif part_number == 2:
+                part_name = "왼손"
+            else:
+                part_name = f"파트 {part_number}"
+
+            review_warnings.append(
+                f"{sheet}쪽 내 {measure}번째 마디 {part_name}: "
+                "음표의 박자 위치를 정하지 못해 일부 음이 "
+                "누락됐을 수 있습니다."
+            )
+
+        conversion_warnings.extend(correct_rhythm(score))
+        conversion_warnings.extend(separate_repeated_notes(score))
+        _set_tempo(score, bpm)
         for part in score.parts:
             detected_instruments = list(
                 part.recurse().getElementsByClass(instrument.Instrument)
@@ -124,6 +329,13 @@ def convert_pages(
             else:
                 part.insert(0, instrument.Piano())
         score.write("midi", fp=str(output))
+
+        details = conversion_warnings + review_warnings
+        if details:
+            output.with_suffix(".txt").write_text(
+                "\n".join(details),
+                encoding="utf-8",
+            )
 
 
 def main() -> int:
@@ -137,11 +349,17 @@ def main() -> int:
         default="audiveris",
         help="Audiveris 실행 파일 경로",
     )
+    parser.add_argument(
+        "--bpm",
+        type=int,
+        default=120,
+        help="출력 MIDI 속도(기본값: 120)",
+    )
     args = parser.parse_args()
 
     try:
-        convert_score(args.image, args.output, args.audiveris)
-    except (FileNotFoundError, RuntimeError, OSError) as error:
+        convert_score(args.image, args.output, args.audiveris, args.bpm)
+    except (FileNotFoundError, RuntimeError, OSError, ValueError) as error:
         print(f"오류: {error}", file=sys.stderr)
         return 1
 
