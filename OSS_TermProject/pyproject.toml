@@ -24,6 +24,7 @@ gui = ["PySide6>=6.7"]
 [project.scripts]
 score2midi = "score2midi.cli:main"
 score2midi-gui = "score2midi.gui:main"
+score2midi-build-dataset = "score2midi.ml_dataset:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

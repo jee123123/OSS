@@ -36,6 +36,16 @@ score2midi-gui
 
 GUI를 처음 사용할 때 `Audiveris 선택` 버튼을 눌러 `Audiveris.exe`를 지정하세요. 선택한 경로는 사용자 설정에 저장되어 다음 실행부터 자동으로 사용됩니다. 아직 Audiveris를 포함한 설치 패키지는 제공하지 않습니다.
 
+## 음표 인식 학습 데이터 만들기
+
+검토가 끝난 MusicXML과 원본 악보를 이용해 음표 분류용 32x32 이미지와 `labels.csv`를 만들 수 있습니다. MusicXML의 오류도 라벨에 반영되므로 먼저 악보 편집기에서 MusicXML을 확인하세요.
+
+```powershell
+score2midi-build-dataset "score.pdf" "score.musicxml" "training_data"
+```
+
+결과 폴더의 `notehead`에는 MusicXML 음표와 위치가 일치하는 후보가 저장됩니다. 일치하지 않는 후보는 잘못된 음표를 비음표로 학습하는 일을 막기 위해 `review`에 따로 저장되므로, 모델 학습 전에 사람이 확인해야 합니다.
+
 ## 사용법
 
 Windows에서 Audiveris를 기본 경로에 설치한 경우:
