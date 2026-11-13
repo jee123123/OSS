@@ -25,6 +25,77 @@ from score2midi.preprocess import preprocess_page, preprocess_pdf
 CROP_SIZE = 32
 
 
+class ReviewDataset:
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        self.labels_path = self.root / "labels.csv"
+        if not self.labels_path.is_file():
+            raise FileNotFoundError(
+                f"labels.csv를 찾을 수 없습니다: {self.labels_path}"
+            )
+
+        with self.labels_path.open(
+            newline="",
+            encoding="utf-8-sig",
+        ) as file:
+            reader = csv.DictReader(file)
+            self.fieldnames = reader.fieldnames or []
+            self.rows = list(reader)
+
+        if not {"path", "label"}.issubset(self.fieldnames):
+            raise ValueError("labels.csv에 path와 label 열이 필요합니다.")
+
+    def review_indices(self) -> list[int]:
+        return [
+            index
+            for index, row in enumerate(self.rows)
+            if row["label"] == "review"
+        ]
+
+    def classify(self, index: int, label: str) -> None:
+        if label not in {"notehead", "other", "review"}:
+            raise ValueError(f"지원하지 않는 라벨입니다: {label}")
+
+        row = self.rows[index]
+        old_label = row["label"]
+        old_relative = Path(row["path"])
+        if old_label == label:
+            return
+
+        source = (self.root / old_relative).resolve()
+        if not source.is_relative_to(self.root):
+            raise ValueError(f"데이터셋 밖의 경로입니다: {source}")
+        if not source.is_file():
+            raise FileNotFoundError(f"후보 이미지를 찾을 수 없습니다: {source}")
+
+        destination_dir = self.root / label
+        destination_dir.mkdir(exist_ok=True)
+        destination = destination_dir / source.name
+        if destination.exists():
+            raise FileExistsError(f"이미 파일이 존재합니다: {destination}")
+
+        destination_relative = destination.relative_to(self.root)
+        source.replace(destination)
+        row["path"] = destination_relative.as_posix()
+        row["label"] = label
+
+        try:
+            self._save()
+        except OSError:
+            destination.replace(source)
+            row["path"] = old_relative.as_posix()
+            row["label"] = old_label
+            raise
+
+    def _save(self) -> None:
+        temporary = self.labels_path.with_suffix(".tmp")
+        with temporary.open("w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.DictWriter(file, fieldnames=self.fieldnames)
+            writer.writeheader()
+            writer.writerows(self.rows)
+        temporary.replace(self.labels_path)
+
+
 def _notehead_y(
     note_pitch: pitch.Pitch,
     staff: tuple[int, int, int, int, int],

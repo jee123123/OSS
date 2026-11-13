@@ -1,6 +1,11 @@
 import unittest
+import csv
+import tempfile
+from pathlib import Path
 
-from score2midi.ml_dataset import _candidate_labels
+from PIL import Image
+
+from score2midi.ml_dataset import ReviewDataset, _candidate_labels
 
 
 class MlDatasetTest(unittest.TestCase):
@@ -11,3 +16,35 @@ class MlDatasetTest(unittest.TestCase):
         labels = _candidate_labels(candidates, expected, spacing=10)
 
         self.assertEqual(labels, ["notehead", "review"])
+
+    def test_review_classification_moves_file_and_updates_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            review_dir = root / "review"
+            review_dir.mkdir()
+            image_path = review_dir / "candidate.png"
+            Image.new("L", (32, 32), 255).save(image_path)
+
+            labels_path = root / "labels.csv"
+            with labels_path.open(
+                "w",
+                newline="",
+                encoding="utf-8-sig",
+            ) as file:
+                writer = csv.DictWriter(file, fieldnames=("path", "label"))
+                writer.writeheader()
+                writer.writerow(
+                    {"path": "review/candidate.png", "label": "review"}
+                )
+
+            dataset = ReviewDataset(root)
+            dataset.classify(0, "notehead")
+
+            self.assertFalse(image_path.exists())
+            self.assertTrue((root / "notehead" / "candidate.png").is_file())
+            reloaded = ReviewDataset(root)
+            self.assertEqual(reloaded.rows[0]["label"], "notehead")
+            self.assertEqual(
+                reloaded.rows[0]["path"],
+                "notehead/candidate.png",
+            )

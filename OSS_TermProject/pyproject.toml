@@ -20,11 +20,14 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.7"]
+ml = ["torch>=2.4"]
 
 [project.scripts]
 score2midi = "score2midi.cli:main"
 score2midi-gui = "score2midi.gui:main"
 score2midi-build-dataset = "score2midi.ml_dataset:main"
+score2midi-review-dataset = "score2midi.dataset_reviewer:main"
+score2midi-train-note-classifier = "score2midi.note_classifier:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

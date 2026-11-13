@@ -46,6 +46,20 @@ score2midi-build-dataset "score.pdf" "score.musicxml" "training_data"
 
 결과 폴더의 `notehead`에는 MusicXML 음표와 위치가 일치하는 후보가 저장됩니다. 일치하지 않는 후보는 잘못된 음표를 비음표로 학습하는 일을 막기 위해 `review`에 따로 저장되므로, 모델 학습 전에 사람이 확인해야 합니다.
 
+검토 GUI에서는 `1`을 누르면 음표, `2`를 누르면 비음표로 분류하며, `Space`로 건너뛰고 `Ctrl+Z`로 마지막 분류를 되돌릴 수 있습니다. 분류할 때마다 이미지 위치와 `labels.csv`가 즉시 저장됩니다.
+
+```powershell
+python -m score2midi.dataset_reviewer "training_data"
+```
+
+검토된 `notehead`와 `other`가 각각 20개 이상이면 첫 PyTorch 분류 모델을 학습할 수 있습니다. 두 클래스의 개수가 다르면 적은 클래스에 맞춰 균형 있게 사용하며, 일부 데이터는 검증용으로 자동 분리됩니다.
+
+```powershell
+python -m score2midi.note_classifier "training_data" "models/notehead.pt"
+```
+
+한 악보에서 만든 소량의 데이터로 얻은 검증 정확도는 참고용입니다. 실제 변환에 연결하기 전 여러 악보로 학습하고, 학습에 사용하지 않은 악보에서도 성능을 확인해야 합니다.
+
 ## 사용법
 
 Windows에서 Audiveris를 기본 경로에 설치한 경우:
