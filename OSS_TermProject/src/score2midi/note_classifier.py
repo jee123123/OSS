@@ -51,15 +51,44 @@ class NoteheadDataset(Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
         row = self.rows[index]
-        with Image.open(self.root / row["path"]) as image:
-            image = image.convert("L").resize(
-                (IMAGE_SIZE, IMAGE_SIZE),
-                Image.Resampling.LANCZOS,
-            )
-            pixels = np.asarray(image, dtype=np.float32)
+        return _image_tensor(self.root / row["path"]), CLASS_NAMES.index(
+            row["label"]
+        )
 
-        tensor = torch.from_numpy((255.0 - pixels) / 255.0).unsqueeze(0)
-        return tensor, CLASS_NAMES.index(row["label"])
+
+def _image_tensor(path: Path) -> torch.Tensor:
+    with Image.open(path) as image:
+        image = image.convert("L").resize(
+            (IMAGE_SIZE, IMAGE_SIZE),
+            Image.Resampling.LANCZOS,
+        )
+        pixels = np.asarray(image, dtype=np.float32)
+    return torch.from_numpy((255.0 - pixels) / 255.0).unsqueeze(0)
+
+
+class NoteheadPredictor:
+    def __init__(self, model_path: Path):
+        checkpoint = torch.load(
+            model_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        class_names = tuple(checkpoint.get("class_names", ()))
+        if class_names != CLASS_NAMES:
+            raise ValueError("지원하지 않는 음표 분류 모델입니다.")
+
+        self.model = NoteheadClassifier()
+        self.model.load_state_dict(checkpoint["state_dict"])
+        self.model.eval()
+
+    def predict(self, image_path: Path) -> tuple[str, float]:
+        with torch.no_grad():
+            probabilities = torch.softmax(
+                self.model(_image_tensor(image_path).unsqueeze(0)),
+                dim=1,
+            )[0]
+        index = int(probabilities.argmax().item())
+        return CLASS_NAMES[index], float(probabilities[index].item())
 
 
 def _load_balanced_rows(

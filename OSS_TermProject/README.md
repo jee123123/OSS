@@ -48,6 +48,14 @@ score2midi-build-dataset "score.pdf" "score.musicxml" "training_data"
 
 검토 GUI에서는 `1`을 누르면 음표, `2`를 누르면 비음표로 분류하며, `Space`로 건너뛰고 `Ctrl+Z`로 마지막 분류를 되돌릴 수 있습니다. 분류할 때마다 이미지 위치와 `labels.csv`가 즉시 저장됩니다.
 
+빨간 상자는 판정할 후보의 중심을 표시합니다. 상자 중앙에 검거나 빈 타원형 음표 머리가 있으면 줄기와 오선이 함께 보이더라도 음표로 분류합니다. `비음표 다시 검토` 버튼으로 기존 비음표 라벨도 다시 확인할 수 있습니다.
+
+이전 버전에서 만든 데이터셋에는 다음 명령으로 원본 악보 주변 이미지를 추가할 수 있습니다. 기존 라벨은 유지됩니다.
+
+```powershell
+python -m score2midi.ml_dataset "score.pdf" --add-context "training_data"
+```
+
 ```powershell
 python -m score2midi.dataset_reviewer "training_data"
 ```
@@ -59,6 +67,12 @@ python -m score2midi.note_classifier "training_data" "models/notehead.pt"
 ```
 
 한 악보에서 만든 소량의 데이터로 얻은 검증 정확도는 참고용입니다. 실제 변환에 연결하기 전 여러 악보로 학습하고, 학습에 사용하지 않은 악보에서도 성능을 확인해야 합니다.
+
+학습 모델은 검토 GUI에서 추천 용도로 사용할 수 있습니다. 추천은 자동 저장되지 않으며, 화면을 확인한 뒤 맞으면 `Enter`로 적용합니다.
+
+```powershell
+python -m score2midi.dataset_reviewer "training_data" --model "models/notehead.pt"
+```
 
 ## 사용법
 

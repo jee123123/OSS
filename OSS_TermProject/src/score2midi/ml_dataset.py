@@ -158,6 +158,59 @@ def _load_pages(source: Path) -> list[Image.Image]:
         return [preprocess_page(image)]
 
 
+def _context_crop(
+    page: Image.Image,
+    x: int,
+    y: int,
+    spacing: float,
+) -> Image.Image:
+    half_width = max(48, round(spacing * 4.5))
+    half_height = max(36, round(spacing * 3.2))
+    return page.crop(
+        (
+            x - half_width,
+            y - half_height,
+            x + half_width + 1,
+            y + half_height + 1,
+        )
+    ).convert("L")
+
+
+def add_context_images(source: Path, dataset_dir: Path) -> int:
+    dataset = ReviewDataset(dataset_dir)
+    required = {"page", "x", "y"}
+    if not required.issubset(dataset.fieldnames):
+        raise ValueError("labels.csv에 page, x, y 열이 필요합니다.")
+
+    pages = _load_pages(source)
+    context_dir = dataset.root / "context"
+    context_dir.mkdir(exist_ok=True)
+    if "context_path" not in dataset.fieldnames:
+        dataset.fieldnames.append("context_path")
+
+    try:
+        for row in dataset.rows:
+            page_number = int(row["page"])
+            if not 1 <= page_number <= len(pages):
+                raise ValueError(f"존재하지 않는 페이지입니다: {page_number}")
+            page = pages[page_number - 1]
+            spacing = max(8.0, page.height / 175)
+            relative_path = Path("context") / Path(row["path"]).name
+            _context_crop(
+                page,
+                int(row["x"]),
+                int(row["y"]),
+                spacing,
+            ).save(dataset.root / relative_path)
+            row["context_path"] = relative_path.as_posix()
+    finally:
+        for page in pages:
+            page.close()
+
+    dataset._save()
+    return len(dataset.rows)
+
+
 def _detect_expected_staves(
     page: Image.Image,
     expected_count: int,
@@ -241,6 +294,7 @@ def build_notehead_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
     for label in ("notehead", "review"):
         (output_dir / label).mkdir(exist_ok=True)
+    (output_dir / "context").mkdir(exist_ok=True)
 
     pages = _load_pages(source)
     rows = []
@@ -313,6 +367,10 @@ def build_notehead_dataset(
                         zip(candidates, labels),
                         1,
                     ):
+                        filename = (
+                            f"p{page_number:03d}_m{region.global_number:03d}_"
+                            f"part{part_number}_c{index:03d}.png"
+                        )
                         half_width = max(4, round(spacing * 0.9))
                         half_height = max(4, round(spacing * 0.7))
                         crop = page.crop(
@@ -327,12 +385,12 @@ def build_notehead_dataset(
                             (CROP_SIZE, CROP_SIZE),
                             Image.Resampling.LANCZOS,
                         )
-                        filename = (
-                            f"p{page_number:03d}_m{region.global_number:03d}_"
-                            f"part{part_number}_c{index:03d}.png"
-                        )
                         relative_path = Path(label) / filename
+                        context_path = Path("context") / filename
                         crop.save(output_dir / relative_path)
+                        _context_crop(page, x, y, spacing).save(
+                            output_dir / context_path
+                        )
                         counts[label] += 1
                         rows.append(
                             {
@@ -344,6 +402,7 @@ def build_notehead_dataset(
                                 "x": x,
                                 "y": y,
                                 "confidence": f"{confidence:.4f}",
+                                "context_path": context_path.as_posix(),
                             }
                         )
     finally:
@@ -362,6 +421,7 @@ def build_notehead_dataset(
                 "x",
                 "y",
                 "confidence",
+                "context_path",
             ),
         )
         writer.writeheader()
@@ -375,9 +435,26 @@ def main() -> int:
         description="악보와 MusicXML에서 음표 분류 학습 데이터를 만듭니다."
     )
     parser.add_argument("source", type=Path, help="원본 PDF 또는 악보 이미지")
-    parser.add_argument("musicxml", type=Path, help="검토가 끝난 MusicXML")
-    parser.add_argument("output", type=Path, help="학습 데이터 저장 폴더")
+    parser.add_argument("musicxml", nargs="?", type=Path)
+    parser.add_argument("output", nargs="?", type=Path)
+    parser.add_argument(
+        "--add-context",
+        type=Path,
+        metavar="DATASET",
+        help="기존 데이터셋에 원본 악보 주변 이미지를 추가합니다.",
+    )
     args = parser.parse_args()
+
+    if args.add_context is not None:
+        try:
+            count = add_context_images(args.source, args.add_context)
+        except (FileNotFoundError, OSError, ValueError) as error:
+            parser.error(str(error))
+        print(f"주변 이미지 {count}개를 추가했습니다.")
+        return 0
+
+    if args.musicxml is None or args.output is None:
+        parser.error("MusicXML과 학습 데이터 저장 폴더가 필요합니다.")
 
     try:
         counts = build_notehead_dataset(

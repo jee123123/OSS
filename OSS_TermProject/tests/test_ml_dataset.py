@@ -5,10 +5,21 @@ from pathlib import Path
 
 from PIL import Image
 
-from score2midi.ml_dataset import ReviewDataset, _candidate_labels
+from score2midi.ml_dataset import (
+    ReviewDataset,
+    _candidate_labels,
+    _context_crop,
+)
 
 
 class MlDatasetTest(unittest.TestCase):
+    def test_context_crop_keeps_surrounding_score(self) -> None:
+        image = Image.new("L", (200, 160), 255)
+
+        crop = _context_crop(image, 100, 80, spacing=10)
+
+        self.assertEqual(crop.size, (97, 73))
+
     def test_labels_candidates_by_musicxml_position(self) -> None:
         candidates = [(100, 50, 0.9), (150, 80, 0.8)]
         expected = [(102.0, 49.0)]
@@ -48,3 +59,8 @@ class MlDatasetTest(unittest.TestCase):
                 reloaded.rows[0]["path"],
                 "notehead/candidate.png",
             )
+
+            reloaded.classify(0, "review")
+            restored = ReviewDataset(root)
+            self.assertEqual(restored.rows[0]["label"], "review")
+            self.assertTrue(image_path.is_file())
