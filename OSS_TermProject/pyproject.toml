@@ -32,3 +32,6 @@ score2midi-train-note-classifier = "score2midi.note_classifier:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+score2midi = ["models/*.pt"]
+

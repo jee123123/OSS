@@ -25,6 +25,7 @@ NO_TIME_OFFSET_PATTERN = re.compile(
     r"Measure\{#(?P<measure>\d+)P(?P<part>\d+)\}"
     r".*?No timeOffset"
 )
+DEFAULT_NOTE_MODEL = Path(__file__).with_name("models") / "notehead.pt"
 
 
 def _find_unplaced_chords(
@@ -52,14 +53,33 @@ def _set_tempo(score, bpm: int) -> None:
     score.insert(0, tempo.MetronomeMark(number=bpm))
 
 
+def _load_notehead_predictor(note_model: Path | None):
+    if note_model is None:
+        return None, None
+
+    try:
+        if not note_model.is_file():
+            raise FileNotFoundError(note_model)
+        from score2midi.note_classifier import NoteheadPredictor
+
+        return NoteheadPredictor(note_model).predict, None
+    except Exception as error:
+        return (
+            None,
+            "AI 음표 모델을 불러오지 못해 기존 방식으로 변환했습니다: "
+            f"{error}",
+        )
+
+
 def convert_score(
     image: Path,
     output: Path,
     audiveris: str,
     bpm: int = 120,
+    note_model: Path | None = DEFAULT_NOTE_MODEL,
 ) -> None:
     """Convert a score image to MIDI using Audiveris and music21."""
-    convert_pages([image], output, audiveris, bpm)
+    convert_pages([image], output, audiveris, bpm, note_model)
 
 
 def _run_audiveris(
@@ -115,6 +135,7 @@ def convert_pages(
     output: Path,
     audiveris: str,
     bpm: int = 120,
+    note_model: Path | None = DEFAULT_NOTE_MODEL,
 ) -> None:
     """Convert ordered score pages into one MIDI file."""
     if not images:
@@ -142,6 +163,8 @@ def convert_pages(
             "--audiveris 옵션에 실행 파일 경로를 지정하세요."
         )
     audiveris_command = executable or str(Path(audiveris).resolve())
+
+    notehead_predictor, model_warning = _load_notehead_predictor(note_model)
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -183,7 +206,7 @@ def convert_pages(
                 compression="tiff_lzw",
                 dpi=(300, 300),
             )
-            if extension_changed:
+            if extension_changed and not pdf_inputs:
                 extended_pages[0].save(
                     extended_document,
                     "TIFF",
@@ -202,10 +225,10 @@ def convert_pages(
             audiveris_command,
         )
         score = converter.parse(str(primary_musicxml))
-        conversion_warnings: list[str] = []
+        conversion_warnings = [model_warning] if model_warning else []
         review_warnings: list[str] = []
 
-        if extension_changed:
+        if extension_changed and not pdf_inputs:
             try:
                 extended_musicxml, _ = _run_audiveris(
                     extended_document,
@@ -222,11 +245,12 @@ def convert_pages(
                     f"계속했습니다: {error}"
                 )
 
-        if pdf_inputs:
+        if pdf_inputs and (unplaced_chords or extension_changed):
             try:
                 high_resolution_pages = preprocess_pdf(
                     pdf_inputs[0],
                     dpi=400,
+                    extend_final_system=extension_changed,
                 )
                 high_resolution_document = (
                     Path(temp_dir) / "score-400dpi.tiff"
@@ -265,33 +289,13 @@ def convert_pages(
                     f"계속했습니다: {error}"
                 )
 
-            try:
-                alternative_musicxml, _ = _run_audiveris(
-                    pdf_inputs[0].resolve(),
-                    Path(temp_dir) / "alternative",
-                    audiveris_command,
-                )
-                alternative_score = converter.parse(
-                    str(alternative_musicxml)
-                )
-                conversion_warnings.extend(
-                    recover_missing_short_notes(
-                        score,
-                        alternative_score,
-                    )
-                )
-            except (FileNotFoundError, RuntimeError, OSError) as error:
-                conversion_warnings.append(
-                    "원본 PDF 보조 인식은 실패했지만 기본 변환은 "
-                    f"계속했습니다: {error}"
-                )
-
         try:
             beam_warnings, recovered_chords = recover_unplaced_beamed_notes(
                 score,
                 input_document,
                 primary_musicxml,
                 unplaced_chords,
+                notehead_predictor=notehead_predictor,
             )
             conversion_warnings.extend(beam_warnings)
         except (OSError, ValueError, IndexError, StopIteration) as error:
@@ -356,10 +360,22 @@ def main() -> int:
         default=120,
         help="출력 MIDI 속도(기본값: 120)",
     )
+    parser.add_argument(
+        "--note-model",
+        type=Path,
+        default=DEFAULT_NOTE_MODEL,
+        help="기본 내장 모델 대신 사용할 PyTorch 모델(.pt)",
+    )
     args = parser.parse_args()
 
     try:
-        convert_score(args.image, args.output, args.audiveris, args.bpm)
+        convert_score(
+            args.image,
+            args.output,
+            args.audiveris,
+            args.bpm,
+            args.note_model,
+        )
     except (FileNotFoundError, RuntimeError, OSError, ValueError) as error:
         print(f"오류: {error}", file=sys.stderr)
         return 1

@@ -114,3 +114,64 @@ class RhythmRecoveryTest(unittest.TestCase):
         measures = list(primary_part.getElementsByClass(stream.Measure))
         self.assertEqual(len(measures), 2)
         self.assertTrue(any("마지막 마디" in warning for warning in warnings))
+
+    def test_matches_alternative_measures_by_number(self) -> None:
+        primary = stream.Score()
+        primary_part = stream.Part()
+        for number in (1, 2):
+            measure = stream.Measure(number=number)
+            measure.insert(0, meter.TimeSignature("4/4"))
+            measure.insert(0, note.Note("C4", quarterLength=4))
+            primary_part.append(measure)
+        primary.insert(0, primary_part)
+
+        alternative = stream.Score()
+        alternative_part = stream.Part()
+        for number, pitch in ((1, "C4"), (99, "F4"), (2, "D4")):
+            measure = stream.Measure(number=number)
+            measure.insert(0, meter.TimeSignature("4/4"))
+            for index in range(8):
+                measure.insert(
+                    Fraction(index, 2),
+                    note.Note(pitch, quarterLength=Fraction(1, 2)),
+                )
+            alternative_part.append(measure)
+        alternative.insert(0, alternative_part)
+
+        recover_missing_short_notes(primary, alternative)
+
+        pitches = [
+            event.pitch.nameWithOctave
+            for event in primary_part.measure(2).notes
+        ]
+        self.assertEqual(pitches, ["D4"] * 8)
+
+    def test_rejects_overfull_alternative_measure(self) -> None:
+        primary = stream.Score()
+        primary_part = stream.Part()
+        primary_measure = stream.Measure(number=1)
+        primary_measure.insert(0, meter.TimeSignature("4/4"))
+        for offset in range(4):
+            primary_measure.insert(
+                offset,
+                note.Note("C4", quarterLength=1),
+            )
+        primary_part.append(primary_measure)
+        primary.insert(0, primary_part)
+
+        alternative = stream.Score()
+        alternative_part = stream.Part()
+        alternative_measure = stream.Measure(number=1)
+        alternative_measure.insert(0, meter.TimeSignature("4/4"))
+        for index in range(10):
+            alternative_measure.insert(
+                Fraction(index, 2),
+                note.Note("D4", quarterLength=Fraction(1, 2)),
+            )
+        alternative_part.append(alternative_measure)
+        alternative.insert(0, alternative_part)
+
+        warnings = recover_missing_short_notes(primary, alternative)
+
+        self.assertEqual(len(primary_part.measure(1).notes), 4)
+        self.assertEqual(warnings, [])

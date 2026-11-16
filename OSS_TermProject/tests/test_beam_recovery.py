@@ -65,6 +65,20 @@ class BeamRecoveryTest(unittest.TestCase):
 
         self.assertTrue(any(len(group) == 4 for group in groups))
 
+        rejected = detect_beamed_note_groups(
+            image,
+            staff,
+            notehead_predictor=lambda _: ("other", 0.95),
+        )
+        fallback = detect_beamed_note_groups(
+            image,
+            staff,
+            notehead_predictor=lambda _: ("other", 0.89),
+        )
+
+        self.assertEqual(rejected, [])
+        self.assertTrue(any(len(group) == 4 for group in fallback))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from statistics import median
 from pathlib import Path
+from typing import Callable
 from xml.etree import ElementTree
 from zipfile import ZipFile, is_zipfile
 
@@ -435,9 +436,15 @@ def detect_beamed_note_groups(
     staff_lines: tuple[int, int, int, int, int],
     clef: str = "treble",
     key_signature: int = 0,
+    notehead_predictor: Callable[
+        [Image.Image], tuple[str, float]
+    ] | None = None,
+    model_minimum_confidence: float = 0.9,
 ) -> list[list[BeamNote]]:
     if clef not in {"treble", "bass"}:
         raise ValueError("clef must be 'treble' or 'bass'")
+    if not 0.5 <= model_minimum_confidence <= 1:
+        raise ValueError("model_minimum_confidence must be between 0.5 and 1")
 
     gray = _gray_array(image)
     ink = _ink_mask(gray)
@@ -450,6 +457,27 @@ def detect_beamed_note_groups(
         staff_lines,
         spacing,
     )
+    if notehead_predictor is not None:
+        page = Image.fromarray(gray)
+        half_width = max(4, round(spacing * 0.9))
+        half_height = max(4, round(spacing * 0.7))
+        heads = [
+            candidate
+            for candidate in heads
+            if (
+                (prediction := notehead_predictor(
+                    page.crop(
+                        (
+                            candidate[0] - half_width,
+                            candidate[1] - half_height,
+                            candidate[0] + half_width + 1,
+                            candidate[1] + half_height + 1,
+                        )
+                    )
+                ))[1] < model_minimum_confidence
+                or prediction[0] == "notehead"
+            )
+        ]
     staff_middle = sum(staff_lines) / len(staff_lines)
     groups: list[list[BeamNote]] = []
     seen_stems: set[tuple[int, ...]] = set()
@@ -704,6 +732,10 @@ def recover_unplaced_beamed_notes(
     musicxml: Path,
     unplaced_chords: set[tuple[int, int, int]],
     minimum_confidence: float = 0.55,
+    notehead_predictor: Callable[
+        [Image.Image], tuple[str, float]
+    ] | None = None,
+    model_minimum_confidence: float = 0.9,
 ) -> tuple[list[str], set[tuple[int, int, int]]]:
     if not unplaced_chords:
         return [], set()
@@ -777,6 +809,8 @@ def recover_unplaced_beamed_notes(
                     staff,
                     clef_name,
                     sharps,
+                    notehead_predictor,
+                    model_minimum_confidence,
                 ):
                 candidates = [
                     candidate

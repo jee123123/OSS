@@ -7,7 +7,6 @@ from music21 import stream
 
 SHORT_NOTE_LIMIT = Fraction(2, 3)
 MIN_SHORT_NOTE_GAIN = 1
-MAX_EXTRA_RHYTHM_ERROR = Fraction(1, 2)
 
 
 def _short_note_count(measure: stream.Measure) -> int:
@@ -22,9 +21,15 @@ def _note_event_count(measure: stream.Measure) -> int:
 
 
 def _measure_rhythm_error(measure: stream.Measure) -> Fraction:
-    expected = Fraction(measure.barDuration.quarterLength)
+    expected = Fraction(measure.barDuration.quarterLength) - Fraction(
+        measure.paddingLeft or 0
+    )
     actual = Fraction(measure.highestTime)
     return abs(actual - expected)
+
+
+def _measure_key(measure: stream.Measure) -> tuple[str, str]:
+    return str(measure.number), str(measure.numberSuffix or "")
 
 
 def recover_missing_short_notes(
@@ -43,11 +48,18 @@ def recover_missing_short_notes(
         alternative_measures = list(
             alternative_part.getElementsByClass(stream.Measure)
         )
+        alternative_by_key = {
+            _measure_key(measure): measure
+            for measure in alternative_measures
+        }
 
-        for primary_measure, alternative_measure in zip(
-            primary_measures,
-            alternative_measures,
-        ):
+        for primary_measure in primary_measures:
+            alternative_measure = alternative_by_key.get(
+                _measure_key(primary_measure)
+            )
+            if alternative_measure is None:
+                continue
+
             primary_count = _note_event_count(primary_measure)
             alternative_count = _note_event_count(alternative_measure)
             recovered_count = (
@@ -66,19 +78,13 @@ def recover_missing_short_notes(
                 alternative_measure
             )
 
+            if alternative_error != 0:
+                continue
+
             if (
                 alternative_count == primary_count
                 and alternative_error >= primary_error
             ):
-                continue
-
-            allowed_extra_error = (
-                Fraction(0)
-                if recovered_count == 1
-                else MAX_EXTRA_RHYTHM_ERROR
-            )
-
-            if alternative_error > primary_error + allowed_extra_error:
                 continue
 
             measure_offset = primary_measure.offset
@@ -93,9 +99,26 @@ def recover_missing_short_notes(
                 f"{recovered_count}개를 복구했습니다."
             )
 
+        primary_keys = {_measure_key(measure) for measure in primary_measures}
+        last_primary_key = (
+            _measure_key(primary_measures[-1])
+            if primary_measures
+            else None
+        )
+        last_primary_index = next(
+            (
+                index
+                for index, measure in enumerate(alternative_measures)
+                if _measure_key(measure) == last_primary_key
+            ),
+            len(alternative_measures),
+        )
+
         for alternative_measure in alternative_measures[
-            len(primary_measures):
+            last_primary_index + 1:
         ]:
+            if _measure_key(alternative_measure) in primary_keys:
+                continue
             if _note_event_count(alternative_measure) == 0:
                 continue
 

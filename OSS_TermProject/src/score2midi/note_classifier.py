@@ -56,13 +56,20 @@ class NoteheadDataset(Dataset):
         )
 
 
-def _image_tensor(path: Path) -> torch.Tensor:
-    with Image.open(path) as image:
-        image = image.convert("L").resize(
+def _image_tensor(source: Path | Image.Image) -> torch.Tensor:
+    if isinstance(source, Image.Image):
+        image = source.convert("L").resize(
             (IMAGE_SIZE, IMAGE_SIZE),
             Image.Resampling.LANCZOS,
         )
         pixels = np.asarray(image, dtype=np.float32)
+    else:
+        with Image.open(source) as image:
+            image = image.convert("L").resize(
+                (IMAGE_SIZE, IMAGE_SIZE),
+                Image.Resampling.LANCZOS,
+            )
+            pixels = np.asarray(image, dtype=np.float32)
     return torch.from_numpy((255.0 - pixels) / 255.0).unsqueeze(0)
 
 
@@ -81,10 +88,10 @@ class NoteheadPredictor:
         self.model.load_state_dict(checkpoint["state_dict"])
         self.model.eval()
 
-    def predict(self, image_path: Path) -> tuple[str, float]:
+    def predict(self, image: Path | Image.Image) -> tuple[str, float]:
         with torch.no_grad():
             probabilities = torch.softmax(
-                self.model(_image_tensor(image_path).unsqueeze(0)),
+                self.model(_image_tensor(image).unsqueeze(0)),
                 dim=1,
             )[0]
         index = int(probabilities.argmax().item())

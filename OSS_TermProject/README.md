@@ -8,6 +8,8 @@
 2. Audiveris가 MusicXML을 내보냅니다.
 3. Score2MIDI가 보정된 MusicXML과 MIDI 파일을 함께 저장합니다.
 
+PDF는 먼저 300 DPI로 한 번 인식하며, 박자 위치 오류가 발견되거나 마지막 오선 보정이 필요한 경우에만 400 DPI 보조 인식을 한 번 추가합니다. 따라서 Audiveris는 최대 두 번 실행됩니다.
+
 인식 결과는 원본 악보의 품질과 표기 방식에 따라 달라질 수 있습니다. 특히 낮은 해상도나 흐린 이미지는 판독 결과가 부정확하거나 처리되지 않을 수 있습니다.
 
 ## 준비물
@@ -30,11 +32,13 @@ python -m pip install -e .
 GUI 기능을 사용할 때는 선택 의존성을 설치한 다음 실행합니다. GUI는 다중 페이지 PDF 한 개를 직접 변환하거나, 한 곡의 악보 이미지 여러 장을 목록 순서대로 결합해 MIDI와 MusicXML 파일로 저장합니다. `위로`와 `아래로` 버튼으로 이미지 페이지 순서를 조정하고 결과 파일 이름과 저장 폴더를 지정할 수 있습니다. PDF와 이미지 파일은 함께 사용할 수 없습니다. 생성되는 MIDI의 악기 음색은 피아노로 지정됩니다.
 
 ```powershell
-python -m pip install -e ".[gui]"
+python -m pip install -e ".[gui,ml]"
 score2midi-gui
 ```
 
 GUI를 처음 사용할 때 `Audiveris 선택` 버튼을 눌러 `Audiveris.exe`를 지정하세요. 선택한 경로는 사용자 설정에 저장되어 다음 실행부터 자동으로 사용됩니다. 아직 Audiveris를 포함한 설치 패키지는 제공하지 않습니다.
+
+내장 PyTorch 모델은 자동으로 사용됩니다. 모델이 90% 이상 확신한 비음표 후보만 빔 복구에서 제외하며, 확신이 낮으면 기존 OpenCV 결과를 그대로 사용합니다. 모델이나 PyTorch를 불러오지 못해도 기존 방식으로 변환을 계속하고 세부 내용을 결과 `.txt` 파일에 기록합니다.
 
 ## 음표 인식 학습 데이터 만들기
 
@@ -80,6 +84,12 @@ Windows에서 Audiveris를 기본 경로에 설치한 경우:
 
 ```powershell
 score2midi path\to\score.png outputs\score.mid --audiveris "C:\Program Files\Audiveris\Audiveris.exe"
+```
+
+명령행에서도 내장 모델이 자동으로 사용됩니다. 개발 중 다른 모델을 시험할 때만 `--note-model`을 지정합니다.
+
+```powershell
+score2midi path\to\score.pdf outputs\score.mid --audiveris "C:\Program Files\Audiveris\Audiveris.exe" --note-model models\notehead.pt
 ```
 
 Audiveris가 다른 위치에 설치되어 있으면 `--audiveris` 뒤에 해당 실행 파일 경로를 지정합니다. 입력 악보와 생성된 MIDI는 권리를 확인한 뒤 사용·배포하세요.
