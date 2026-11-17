@@ -1,8 +1,9 @@
 """Detect beamed black notes that OMR may omit."""
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
+from itertools import combinations
 from statistics import median
 from pathlib import Path
 from typing import Callable
@@ -154,6 +155,62 @@ def detect_staff_lines(
                 break
 
     return sorted(groups)
+
+
+def deduplicate_staff_lines(
+    staves: list[tuple[int, int, int, int, int]],
+    expected_count: int,
+) -> list[tuple[int, int, int, int, int]]:
+    if len(staves) <= expected_count:
+        return staves
+
+    clusters: list[list[tuple[int, int, int, int, int]]] = []
+    for staff in sorted(staves):
+        if clusters and staff[0] <= max(item[-1] for item in clusters[-1]):
+            clusters[-1].append(staff)
+        else:
+            clusters.append([staff])
+
+    if len(clusters) != expected_count:
+        return staves
+
+    def irregularity(staff: tuple[int, int, int, int, int]) -> float:
+        gaps = np.diff(staff)
+        average = float(np.mean(gaps))
+        return float(np.std(gaps)) / average if average else float("inf")
+
+    return [min(cluster, key=irregularity) for cluster in clusters]
+
+
+def detect_leading_eighth_rest(
+    image: Image.Image | np.ndarray,
+    staff_lines: tuple[int, int, int, int, int],
+    left: float,
+    first_note_x: float,
+) -> bool:
+    spacing = float(median(np.diff(staff_lines)))
+    if first_note_x - left < spacing * 2:
+        return False
+
+    mask = _ink_mask(_gray_array(image))
+    half_width = max(1, round(spacing * 0.22))
+    for y in staff_lines:
+        mask[max(0, y - half_width):y + half_width + 1] = 0
+
+    minimum_x = left + spacing * 0.8
+    maximum_x = first_note_x - spacing * 0.4
+    minimum_y = staff_lines[1] - spacing * 0.4
+    maximum_y = staff_lines[3] + spacing * 0.4
+
+    return any(
+        minimum_x <= x
+        and x + width <= maximum_x
+        and minimum_y <= y + height / 2 <= maximum_y
+        and spacing * 0.7 <= width <= spacing * 1.4
+        and spacing * 0.4 <= height <= spacing * 0.9
+        and spacing * spacing * 0.2 <= area <= spacing * spacing * 0.75
+        for x, y, width, height, area in _components(mask)
+    )
 
 
 def _remove_staff_lines(
@@ -319,7 +376,10 @@ def _stem_components(
 def _beam_components(
     staffless: np.ndarray,
     spacing: float,
-) -> list[tuple[int, int, int, int, int]]:
+) -> tuple[
+    list[tuple[int, int, int, int, int]],
+    list[tuple[int, int, int, int, int]],
+]:
     horizontal = cv2.morphologyEx(
         staffless,
         cv2.MORPH_OPEN,
@@ -328,13 +388,53 @@ def _beam_components(
             (max(6, round(spacing * 1.5)), 1),
         ),
     )
-    return [
+    components = [
         component
         for component in _components(horizontal)
         if component[2] >= spacing * 1.4
         and component[3] >= max(2, spacing * 0.12)
         and component[3] <= spacing * 1.4
     ]
+    lines = cv2.HoughLinesP(
+        staffless,
+        1,
+        np.pi / 180,
+        threshold=max(8, round(spacing)),
+        minLineLength=max(6, round(spacing * 1.4)),
+        maxLineGap=max(3, round(spacing * 1.2)),
+    )
+
+    slanted = []
+    if lines is not None:
+        thickness = max(2, round(spacing * 0.25))
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            width = abs(int(x2) - int(x1)) + 1
+            if width < spacing * 1.4:
+                continue
+            slope = abs(int(y2) - int(y1)) / width
+            if not 0.03 <= slope <= 0.32:
+                continue
+            x = min(int(x1), int(x2))
+            y = min(int(y1), int(y2)) - thickness // 2
+            height = abs(int(y2) - int(y1)) + thickness
+            slanted.append((x, y, width, height, width * thickness))
+
+    components.sort(key=lambda item: item[2], reverse=True)
+    selected = components.copy()
+    for candidate in sorted(slanted, key=lambda item: item[2], reverse=True):
+        x, y, width, height, _ = candidate
+        center_y = y + height / 2
+        if any(
+            min(x + width, old_x + old_width) - max(x, old_x)
+            >= min(width, old_width) * 0.6
+            and abs(center_y - (old_y + old_height / 2))
+            <= spacing * 0.35
+            for old_x, old_y, old_width, old_height, _ in selected
+        ):
+            continue
+        selected.append(candidate)
+
+    return selected, components
 
 
 def _stem_for_note(
@@ -364,20 +464,26 @@ def _beam_count(
     stem: tuple[int, int, int, int, int],
     beams: list[tuple[int, int, int, int, int]],
     spacing: float,
+    reference_y: float | None = None,
 ) -> int:
     stem_x, stem_y, stem_width, stem_height, _ = stem
     center_x = stem_x + stem_width / 2
     connected = []
 
     for beam_x, beam_y, width, height, _ in beams:
+        beam_middle = beam_y + height / 2
         if (
             beam_x - spacing * 0.5
             <= center_x
             <= beam_x + width + spacing * 0.5
             and beam_y <= stem_y + stem_height + spacing * 0.8
             and beam_y + height >= stem_y - spacing * 0.8
+            and (
+                reference_y is None
+                or abs(beam_middle - reference_y) <= spacing * 1.4
+            )
         ):
-            connected.append(beam_y + height / 2)
+            connected.append(beam_middle)
 
     levels: list[float] = []
     for y in sorted(connected):
@@ -451,7 +557,7 @@ def detect_beamed_note_groups(
     spacing = float(median(np.diff(staff_lines)))
     staffless = _remove_staff_lines(ink, staff_lines, spacing)
     stems = _stem_components(ink, spacing)
-    beams = _beam_components(staffless, spacing)
+    beams, horizontal_beams = _beam_components(staffless, spacing)
     heads = _notehead_candidates(
         staffless,
         staff_lines,
@@ -482,7 +588,7 @@ def detect_beamed_note_groups(
     groups: list[list[BeamNote]] = []
     seen_stems: set[tuple[int, ...]] = set()
 
-    for beam in sorted(beams, key=lambda item: item[2], reverse=True):
+    for beam in beams:
         beam_x, beam_y, beam_width, beam_height, _ = beam
         beam_middle = beam_y + beam_height / 2
         if not (
@@ -542,7 +648,20 @@ def detect_beamed_note_groups(
                 continue
 
             x, y, confidence = head
-            beam_count = max(1, _beam_count(stem, beams, spacing))
+            duration_beams = (
+                horizontal_beams
+                if beam in horizontal_beams
+                else beams
+            )
+            beam_count = max(
+                1,
+                _beam_count(
+                    stem,
+                    duration_beams,
+                    spacing,
+                    beam_middle,
+                ),
+            )
             group.append(
                 BeamNote(
                     x=x,
@@ -592,6 +711,158 @@ def is_safe_measure_replacement(
         min(note.quarter_length for note in event)
         for event in events
     ) == expected_duration
+
+
+def select_non_overlapping_beam_groups(
+    groups: list[list[BeamNote]],
+    x_tolerance: float,
+    maximum_gap: float | None = None,
+) -> list[list[BeamNote]]:
+    normalized = []
+    for group in groups:
+        unique = []
+        for candidate in sorted(
+            group,
+            key=lambda item: item.confidence,
+            reverse=True,
+        ):
+            if any(
+                abs(candidate.x - existing.x) <= x_tolerance
+                for existing in unique
+            ):
+                continue
+            unique.append(candidate)
+        ordered = sorted(unique, key=lambda item: item.x)
+        segments: list[list[BeamNote]] = []
+        for candidate in ordered:
+            if (
+                segments
+                and maximum_gap is not None
+                and candidate.x - segments[-1][-1].x > maximum_gap
+            ):
+                segments.append([])
+            if not segments:
+                segments.append([])
+            segments[-1].append(candidate)
+        normalized.extend(segment for segment in segments if len(segment) >= 2)
+
+    preferred = [group for group in normalized if len(group) <= 4]
+    oversized = [group for group in normalized if len(group) > 4]
+    pool = preferred or normalized
+    selected = []
+    for group in sorted(
+        pool,
+        key=lambda item: (
+            len(item),
+            sum(note.confidence for note in item) / len(item),
+        ),
+        reverse=True,
+    ):
+        overlap_index = next(
+            (
+                index
+                for index, accepted in enumerate(selected)
+                if group[0].x <= accepted[-1].x + x_tolerance
+                and accepted[0].x <= group[-1].x + x_tolerance
+            ),
+            None,
+        )
+        if overlap_index is not None:
+            combined = []
+            for candidate in sorted(
+                selected[overlap_index] + group,
+                key=lambda item: item.confidence,
+                reverse=True,
+            ):
+                if any(
+                    abs(candidate.x - existing.x) <= x_tolerance
+                    for existing in combined
+                ):
+                    continue
+                combined.append(candidate)
+            if len(combined) <= 4:
+                selected[overlap_index] = sorted(
+                    combined,
+                    key=lambda item: item.x,
+                )
+            continue
+        selected.append(group)
+
+    selected.sort(key=lambda item: item[0].x)
+    for group in oversized:
+        for index, accepted in enumerate(selected):
+            lower = (
+                float("-inf")
+                if index == 0
+                else (selected[index - 1][-1].x + accepted[0].x) / 2
+            )
+            upper = (
+                float("inf")
+                if index + 1 == len(selected)
+                else (accepted[-1].x + selected[index + 1][0].x) / 2
+            )
+            challenger = [
+                candidate
+                for candidate in group
+                if lower < candidate.x <= upper
+            ]
+            if not 2 <= len(challenger) <= 4:
+                continue
+            challenger_confidence = sum(
+                candidate.confidence for candidate in challenger
+            ) / len(challenger)
+            accepted_confidence = sum(
+                candidate.confidence for candidate in accepted
+            ) / len(accepted)
+            if challenger_confidence > accepted_confidence:
+                selected[index] = challenger
+
+    if maximum_gap is not None:
+        for group in oversized:
+            remaining = [
+                candidate
+                for candidate in group
+                if not any(
+                    abs(candidate.x - existing.x) <= x_tolerance
+                    for accepted in selected
+                    for existing in accepted
+                )
+            ]
+            segments: list[list[BeamNote]] = []
+            for candidate in remaining:
+                if (
+                    segments
+                    and candidate.x - segments[-1][-1].x > maximum_gap
+                ):
+                    segments.append([])
+                if not segments:
+                    segments.append([])
+                segments[-1].append(candidate)
+            for segment in segments:
+                if len(segment) == 1:
+                    candidate = segment[0]
+                    if candidate.confidence >= 0.75:
+                        selected.append(
+                            [
+                                replace(
+                                    candidate,
+                                    beam_count=0,
+                                    quarter_length=Fraction(1),
+                                )
+                            ]
+                        )
+                    continue
+                if len(segment) < 2:
+                    continue
+                if any(
+                    segment[0].x <= accepted[-1].x + x_tolerance
+                    and accepted[0].x <= segment[-1].x + x_tolerance
+                    for accepted in selected
+                ):
+                    continue
+                selected.append(segment)
+
+    return sorted(selected, key=lambda item: item[0].x)
 
 
 def _musicxml_root(path: Path) -> ElementTree.Element:
@@ -726,12 +997,146 @@ def _has_complete_timeline(
     return cursor == bar_duration
 
 
+def _apply_beam_groups(
+    measure: stream.Measure,
+    groups: list[list[BeamNote]],
+    left: float,
+    scale: float,
+    region_width: float,
+    x_tolerance: float,
+    bar_duration: Fraction,
+    individual_durations: bool,
+    add_leading_eighth_rest: bool = False,
+) -> tuple[int, int, stream.Stream]:
+    voices = list(measure.getElementsByClass(stream.Voice))
+    container = voices[0] if voices else measure
+    records: list[list[object]] = []
+    for event in container.notesAndRests:
+        absolute_x = event.style.absoluteX
+        local_x = (
+            float(absolute_x)
+            if absolute_x is not None
+            else region_width * float(Fraction(event.offset) / bar_duration)
+        )
+        records.append([local_x, event])
+
+    if add_leading_eighth_rest and records:
+        leading_rest = note.Rest(quarterLength=Fraction(1, 2))
+        leading_x = min(float(record[0]) for record in records) - x_tolerance
+        leading_rest.style.absoluteX = leading_x
+        records.append([leading_x, leading_rest])
+
+    added = 0
+    adjusted = 0
+
+    for group in sorted(groups, key=lambda item: item[0].x):
+        ordered_group = sorted(group, key=lambda item: item.x)
+        uniform_duration = min(
+            candidate.quarter_length
+            for candidate in ordered_group
+        )
+        positions = [
+            (candidate.x - left) / scale
+            for candidate in ordered_group
+        ]
+        first_x = min(positions) - x_tolerance
+        last_x = max(positions) + x_tolerance
+        replaced = [
+            record
+            for record in records
+            if first_x <= float(record[0]) <= last_x
+            and not record[1].isRest
+        ]
+        used_events: set[int] = set()
+        replacements: list[list[object]] = []
+
+        for candidate, local_x in zip(ordered_group, positions):
+            duration = (
+                candidate.quarter_length
+                if individual_durations
+                else uniform_duration
+            )
+            matching_record = min(
+                (
+                    record
+                    for record in replaced
+                    if id(record[1]) not in used_events
+                    and abs(float(record[0]) - local_x) <= x_tolerance
+                ),
+                key=lambda record: abs(float(record[0]) - local_x),
+                default=None,
+            )
+
+            if matching_record is not None:
+                event = matching_record[1]
+                used_events.add(id(event))
+                adjusted += 1
+            else:
+                event = note.Note(candidate.midi_pitch)
+                added += 1
+
+            event.duration.quarterLength = duration
+            event.style.absoluteX = local_x
+            replacements.append([local_x, event])
+
+        replaced_ids = {id(record[1]) for record in replaced}
+        records = [
+            record
+            for record in records
+            if id(record[1]) not in replaced_ids
+        ]
+        records.extend(replacements)
+
+    for event in list(container.notesAndRests):
+        container.remove(event)
+
+    offset = Fraction(0)
+    for _, event in sorted(records, key=lambda record: float(record[0])):
+        container.insert(offset, event)
+        offset += Fraction(event.duration.quarterLength)
+
+    return added, adjusted, container
+
+
+def _duration_variants(
+    groups: list[list[BeamNote]],
+) -> list[list[list[BeamNote]]]:
+    candidates = [
+        (group_index, note_index, candidate)
+        for group_index, group in enumerate(groups)
+        for note_index, candidate in enumerate(group)
+        if candidate.quarter_length in {Fraction(1, 4), Fraction(1, 2)}
+    ]
+    variants = [groups]
+    toggles = []
+    for count in (1, 2):
+        toggles.extend(combinations(candidates, count))
+    toggles.sort(key=lambda items: sum(item[2].confidence for item in items))
+
+    for items in toggles[:32]:
+        variant = [list(group) for group in groups]
+        for group_index, note_index, candidate in items:
+            duration = (
+                Fraction(1, 2)
+                if candidate.quarter_length == Fraction(1, 4)
+                else Fraction(1, 4)
+            )
+            variant[group_index][note_index] = replace(
+                candidate,
+                beam_count=1 if duration == Fraction(1, 2) else 2,
+                quarter_length=duration,
+            )
+        variants.append(variant)
+
+    return variants
+
+
 def recover_unplaced_beamed_notes(
     score: stream.Score,
     page_document: Path,
     musicxml: Path,
     unplaced_chords: set[tuple[int, int, int]],
-    minimum_confidence: float = 0.55,
+    minimum_confidence: float = 0.5,
     notehead_predictor: Callable[
         [Image.Image], tuple[str, float]
     ] | None = None,
@@ -748,10 +1153,20 @@ def recover_unplaced_beamed_notes(
         pages = [frame.copy() for frame in ImageSequence.Iterator(document)]
 
     try:
-        staves_by_page = {
-            page_number: detect_staff_lines(page)
-            for page_number, page in enumerate(pages, 1)
-        }
+        staves_by_page = {}
+        for page_number, page in enumerate(pages, 1):
+            system_count = 1 + max(
+                (
+                    item.system
+                    for item in regions.values()
+                    if item.page == page_number
+                ),
+                default=-1,
+            )
+            staves_by_page[page_number] = deduplicate_staff_lines(
+                detect_staff_lines(page),
+                system_count * len(score.parts),
+            )
 
         for key in sorted(unplaced_chords):
             page_number, local_number, part_number = key
@@ -803,117 +1218,135 @@ def recover_unplaced_beamed_notes(
             clef_name = "treble" if part_number == 1 else "bass"
             key_signature = measure.getContextByClass("KeySignature")
             sharps = key_signature.sharps if key_signature else 0
+            spacing = float(median(np.diff(staff)))
+            x_tolerance = spacing / scale * 0.65
+            anchors = _measure_anchors(measure)
+            prediction_cache: dict[tuple[int, int], tuple[str, float]] = {}
+
+            def is_notehead_candidate(candidate: BeamNote) -> bool:
+                if notehead_predictor is None:
+                    return True
+                prediction = prediction_cache.get((candidate.x, candidate.y))
+                if prediction is None:
+                    half_width = max(4, round(spacing * 0.9))
+                    half_height = max(4, round(spacing * 0.7))
+                    prediction = notehead_predictor(
+                        page.crop(
+                            (
+                                candidate.x - half_width,
+                                candidate.y - half_height,
+                                candidate.x + half_width + 1,
+                                candidate.y + half_height + 1,
+                            )
+                        )
+                    )
+                    prediction_cache[(candidate.x, candidate.y)] = prediction
+                if (
+                    prediction[1] < model_minimum_confidence
+                    or prediction[0] == "notehead"
+                ):
+                    return True
+                local_x = (candidate.x - left) / scale
+                return any(
+                    abs(anchor_x - local_x) <= x_tolerance
+                    for anchor_x, _ in anchors
+                )
+
             groups = []
             for group in detect_beamed_note_groups(
                     page,
                     staff,
                     clef_name,
                     sharps,
-                    notehead_predictor,
-                    model_minimum_confidence,
                 ):
                 candidates = [
                     candidate
                     for candidate in group
                     if left <= candidate.x <= right
+                    and is_notehead_candidate(candidate)
                 ]
                 if (
-                    len(candidates) >= 4
+                    len(candidates) >= 2
                     and sum(item.confidence for item in candidates)
                     / len(candidates)
                     >= minimum_confidence
                 ):
                     groups.append(candidates)
+            groups = select_non_overlapping_beam_groups(
+                groups,
+                spacing * 0.8,
+                spacing * 3.8,
+            )
+            if anchors:
+                first_note_x = anchors[0][0]
+                groups = [
+                    group
+                    for group in groups
+                    if max(
+                        (candidate.x - left) / scale
+                        for candidate in group
+                    )
+                    >= first_note_x - x_tolerance
+                ]
             if not groups:
                 continue
 
-            spacing = float(median(np.diff(staff)))
-            anchors = _measure_anchors(measure)
-            x_tolerance = spacing / scale * 0.65
             bar_duration = Fraction(measure.barDuration.quarterLength)
-            container = voices[0] if voices else measure
+            ordered_events = sorted(
+                measure.recurse().notesAndRests,
+                key=lambda event: Fraction(event.getOffsetInHierarchy(measure)),
+            )
+            add_leading_eighth_rest = (
+                bool(ordered_events)
+                and not ordered_events[0].isRest
+                and detect_leading_eighth_rest(
+                    page,
+                    staff,
+                    left,
+                    min(candidate.x for group in groups for candidate in group),
+                )
+            )
             original_measure = deepcopy(measure)
             measure_offset = measure.offset
-            added = 0
-            adjusted = 0
+            accepted = None
 
-            for group in sorted(groups, key=lambda item: item[0].x):
-                ordered_group = sorted(group, key=lambda item: item.x)
-                duration = min(
-                    candidate.quarter_length
-                    for candidate in ordered_group
+            attempts = [
+                (variant, True)
+                for variant in _duration_variants(groups)
+            ]
+            attempts.append((groups, False))
+            for candidate_groups, individual_durations in attempts:
+                trial = deepcopy(original_measure)
+                added, adjusted, container = _apply_beam_groups(
+                    trial,
+                    candidate_groups,
+                    left,
+                    scale,
+                    region.width,
+                    x_tolerance,
+                    bar_duration,
+                    individual_durations,
+                    add_leading_eighth_rest,
                 )
-                first_x = (ordered_group[0].x - left) / scale
-                first_anchor = min(
-                    (
-                        anchor
-                        for anchor in anchors
-                        if abs(anchor[0] - first_x) <= x_tolerance
-                    ),
-                    key=lambda anchor: abs(anchor[0] - first_x),
-                    default=None,
-                )
-                group_start = (
-                    first_anchor[1]
-                    if first_anchor is not None
-                    else round(
-                        bar_duration
-                        * Fraction(str(first_x / region.width))
-                        / duration
-                    )
-                    * duration
-                )
+                if (
+                    (added or adjusted)
+                    and _has_complete_timeline(container, bar_duration)
+                ):
+                    accepted = trial, added, adjusted
+                    break
 
-                for index, candidate in enumerate(ordered_group):
-                    local_x = (candidate.x - left) / scale
-                    offset = min(
-                        group_start + index * duration,
-                        bar_duration - duration,
-                    )
-                    matching_anchor = min(
-                        (
-                            anchor
-                            for anchor in anchors
-                            if abs(anchor[0] - local_x) <= x_tolerance
-                        ),
-                        key=lambda anchor: abs(anchor[0] - local_x),
-                        default=None,
-                    )
+            if accepted is None:
+                continue
 
-                    if matching_anchor is not None:
-                        for event in measure.recurse().notes:
-                            if (
-                                Fraction(event.getOffsetInHierarchy(measure))
-                                == matching_anchor[1]
-                            ):
-                                if event.activeSite is not None:
-                                    event.activeSite.setElementOffset(event, offset)
-                                event.duration.quarterLength = duration
-                                adjusted += 1
-                        anchors.remove(matching_anchor)
-                        anchors.append((local_x, offset))
-                        anchors.sort()
-                        continue
-
-                    event = note.Note(candidate.midi_pitch)
-                    event.duration.quarterLength = duration
-                    container.insert(offset, event)
-                    anchors.append((local_x, offset))
-                    anchors.sort()
-                    added += 1
-
-            if added or adjusted:
-                if not _has_complete_timeline(container, bar_duration):
-                    part.remove(measure)
-                    part.insert(measure_offset, original_measure)
-                    continue
-
-                recovered.add(key)
-                warnings.append(
-                    f"{page_number}쪽 {local_number}번째 마디 "
-                    f"파트 {part_number}: 빔 음표 {added}개를 복구하고 "
-                    f"{adjusted}개의 박자를 교정했습니다."
-                )
+            replacement, added, adjusted = accepted
+            part.remove(measure)
+            part.insert(measure_offset, replacement)
+            recovered.add(key)
+            warnings.append(
+                f"{page_number}쪽 {local_number}번째 마디 "
+                f"파트 {part_number}: 빔 음표 {added}개를 복구하고 "
+                f"{adjusted}개의 박자를 교정했습니다."
+            )
     finally:
         for page in pages:
             page.close()

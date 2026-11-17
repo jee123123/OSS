@@ -227,6 +227,7 @@ def convert_pages(
         score = converter.parse(str(primary_musicxml))
         conversion_warnings = [model_warning] if model_warning else []
         review_warnings: list[str] = []
+        beam_sources = [(input_document, primary_musicxml)]
 
         if extension_changed and not pdf_inputs:
             try:
@@ -277,11 +278,15 @@ def convert_pages(
                 high_resolution_score = converter.parse(
                     str(high_resolution_musicxml)
                 )
+                correct_rhythm(high_resolution_score)
                 conversion_warnings.extend(
                     recover_missing_short_notes(
                         score,
                         high_resolution_score,
                     )
+                )
+                beam_sources.append(
+                    (high_resolution_document, high_resolution_musicxml)
                 )
             except (FileNotFoundError, RuntimeError, OSError) as error:
                 conversion_warnings.append(
@@ -290,14 +295,20 @@ def convert_pages(
                 )
 
         try:
-            beam_warnings, recovered_chords = recover_unplaced_beamed_notes(
-                score,
-                input_document,
-                primary_musicxml,
-                unplaced_chords,
-                notehead_predictor=notehead_predictor,
-            )
-            conversion_warnings.extend(beam_warnings)
+            recovered_chords = set()
+            for beam_document, beam_musicxml in beam_sources:
+                remaining_chords = unplaced_chords - recovered_chords
+                if not remaining_chords:
+                    break
+                beam_warnings, recovered = recover_unplaced_beamed_notes(
+                    score,
+                    beam_document,
+                    beam_musicxml,
+                    remaining_chords,
+                    notehead_predictor=notehead_predictor,
+                )
+                recovered_chords.update(recovered)
+                conversion_warnings.extend(beam_warnings)
         except (OSError, ValueError, IndexError, StopIteration) as error:
             recovered_chords = set()
             conversion_warnings.append(

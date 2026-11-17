@@ -20,6 +20,10 @@ def _note_event_count(measure: stream.Measure) -> int:
     return sum(1 for _ in measure.recurse().notes)
 
 
+def _rest_count(measure: stream.Measure) -> int:
+    return sum(1 for _ in measure.recurse().getElementsByClass("Rest"))
+
+
 def _measure_rhythm_error(measure: stream.Measure) -> Fraction:
     expected = Fraction(measure.barDuration.quarterLength) - Fraction(
         measure.paddingLeft or 0
@@ -66,17 +70,27 @@ def recover_missing_short_notes(
                 _short_note_count(alternative_measure)
                 - _short_note_count(primary_measure)
             )
-
-            if (
-                recovered_count < MIN_SHORT_NOTE_GAIN
-                or alternative_count < primary_count
-            ):
-                continue
-
+            recovered_rests = (
+                _rest_count(alternative_measure)
+                - _rest_count(primary_measure)
+            )
             primary_error = _measure_rhythm_error(primary_measure)
             alternative_error = _measure_rhythm_error(
                 alternative_measure
             )
+
+            if (
+                recovered_rests < 0
+                or alternative_count < primary_count
+                or (
+                    recovered_count < MIN_SHORT_NOTE_GAIN
+                    and not (
+                        recovered_rests > 0
+                        and alternative_error < primary_error
+                    )
+                )
+            ):
+                continue
 
             if alternative_error != 0:
                 continue
@@ -93,10 +107,15 @@ def recover_missing_short_notes(
             primary_part.remove(primary_measure)
             primary_part.insert(measure_offset, replacement)
 
+            recovered_items = []
+            if recovered_count > 0:
+                recovered_items.append(f"짧은 음표 {recovered_count}개")
+            if recovered_rests > 0:
+                recovered_items.append(f"쉼표 {recovered_rests}개")
             warnings.append(
                 f"{primary_measure.number}마디 파트 {part_number}: "
-                f"보조 인식 결과에서 짧은 음표 "
-                f"{recovered_count}개를 복구했습니다."
+                f"보조 인식 결과에서 {'와 '.join(recovered_items)}를 "
+                "복구했습니다."
             )
 
         primary_keys = {_measure_key(measure) for measure in primary_measures}

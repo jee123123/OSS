@@ -175,3 +175,74 @@ class RhythmRecoveryTest(unittest.TestCase):
 
         self.assertEqual(len(primary_part.measure(1).notes), 4)
         self.assertEqual(warnings, [])
+
+    def test_recovers_rest_when_it_completes_underfull_measure(self) -> None:
+        primary = stream.Score()
+        primary_part = stream.Part()
+        primary_measure = stream.Measure(number=1)
+        primary_measure.insert(0, meter.TimeSignature("4/4"))
+        for index in range(7):
+            primary_measure.insert(
+                Fraction(index, 2),
+                note.Note("C4", quarterLength=Fraction(1, 2)),
+            )
+        primary_part.append(primary_measure)
+        primary.insert(0, primary_part)
+
+        alternative = stream.Score()
+        alternative_part = stream.Part()
+        alternative_measure = stream.Measure(number=1)
+        alternative_measure.insert(0, meter.TimeSignature("4/4"))
+        alternative_measure.insert(
+            0,
+            note.Rest(quarterLength=Fraction(1, 2)),
+        )
+        for index in range(7):
+            alternative_measure.insert(
+                Fraction(index + 1, 2),
+                note.Note("C4", quarterLength=Fraction(1, 2)),
+            )
+        alternative_part.append(alternative_measure)
+        alternative.insert(0, alternative_part)
+
+        warnings = recover_missing_short_notes(primary, alternative)
+
+        recovered = primary_part.measure(1)
+        self.assertTrue(recovered.notesAndRests[0].isRest)
+        self.assertEqual(recovered.highestTime, 4)
+        self.assertTrue(any("쉼표 1개" in warning for warning in warnings))
+
+    def test_does_not_replace_measure_when_alternative_loses_rest(
+        self,
+    ) -> None:
+        primary = stream.Score()
+        primary_part = stream.Part()
+        primary_measure = stream.Measure(number=1)
+        primary_measure.insert(0, meter.TimeSignature("4/4"))
+        primary_measure.insert(0, note.Rest(quarterLength=Fraction(1, 2)))
+        for index in range(7):
+            primary_measure.insert(
+                Fraction(index + 1, 2),
+                note.Note("C4", quarterLength=Fraction(1, 2)),
+            )
+        primary_part.append(primary_measure)
+        primary.insert(0, primary_part)
+
+        alternative = stream.Score()
+        alternative_part = stream.Part()
+        alternative_measure = stream.Measure(number=1)
+        alternative_measure.insert(0, meter.TimeSignature("4/4"))
+        for index in range(16):
+            alternative_measure.insert(
+                Fraction(index, 4),
+                note.Note("D4", quarterLength=Fraction(1, 4)),
+            )
+        alternative_part.append(alternative_measure)
+        alternative.insert(0, alternative_part)
+
+        warnings = recover_missing_short_notes(primary, alternative)
+
+        recovered = primary_part.measure(1)
+        self.assertTrue(recovered.notesAndRests[0].isRest)
+        self.assertEqual(len(recovered.notes), 7)
+        self.assertEqual(warnings, [])
