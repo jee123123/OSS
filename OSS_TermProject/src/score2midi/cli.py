@@ -17,6 +17,7 @@ from score2midi.preprocess import (
     preprocess_page,
     preprocess_pdf,
 )
+from score2midi.part_consolidation import consolidate_split_piano_parts
 from score2midi.rhythm_corrector import correct_rhythm
 from score2midi.rhythm_recovery import recover_missing_short_notes
 
@@ -315,12 +316,22 @@ def convert_pages(
                 f"빔 음표 보조 복구를 건너뛰었습니다: {error}"
             )
 
+        part_mapping, part_warnings = consolidate_split_piano_parts(score)
+        conversion_warnings.extend(part_warnings)
+        if part_warnings:
+            conversion_warnings.append(
+                "연주 순서 기호가 MusicXML에 없으면 MIDI는 지면 순서대로 "
+                "생성됩니다. D.S., D.S.S., Coda, Fine이 있는 악보는 "
+                "저장된 MusicXML을 검토하세요."
+            )
+
         for sheet, measure, part_number in sorted(
             unplaced_chords - recovered_chords
         ):
-            if part_number == 1:
+            consolidated_part = part_mapping.get(part_number, part_number)
+            if consolidated_part == 1:
                 part_name = "오른손"
-            elif part_number == 2:
+            elif consolidated_part == 2:
                 part_name = "왼손"
             else:
                 part_name = f"파트 {part_number}"

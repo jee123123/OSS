@@ -1,5 +1,7 @@
 import unittest
 from fractions import Fraction
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import cv2
 import numpy as np
@@ -10,6 +12,7 @@ from score2midi.beam_recovery import (
     _apply_beam_groups,
     _duration_variants,
     _has_complete_timeline,
+    _measure_regions,
     detect_beamed_note_groups,
     detect_leading_eighth_rest,
     detect_staff_lines,
@@ -20,6 +23,25 @@ from score2midi.beam_recovery import (
 
 
 class BeamRecoveryTest(unittest.TestCase):
+    def test_measure_regions_accepts_missing_left_margin(self) -> None:
+        xml = """\
+<score-partwise version="4.0">
+  <defaults><page-layout><page-width>1000</page-width></page-layout></defaults>
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1" width="200"><print new-system="yes"/></measure>
+  </part>
+</score-partwise>
+"""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "score.musicxml"
+            path.write_text(xml, encoding="utf-8")
+
+            page_width, regions = _measure_regions(path)
+
+        self.assertEqual(page_width, 1000)
+        self.assertEqual(regions[(1, 1)].x, 0)
+
     def test_detects_staff_lines(self) -> None:
         image = np.full((120, 240), 255, dtype=np.uint8)
         for y in (40, 48, 56, 64, 72):

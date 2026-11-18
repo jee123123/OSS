@@ -11,15 +11,14 @@ import numpy as np
 from music21 import chord, clef, converter, pitch, stream
 from PIL import Image
 
-from score2midi.beam_recovery import (
+from score2midi.beam_image import (
     _gray_array,
     _ink_mask,
-    _measure_regions,
     _notehead_candidates,
     _remove_staff_lines,
-    _staff_bounds,
     detect_staff_lines,
 )
+from score2midi.beam_layout import _measure_regions, _staff_bounds
 from score2midi.preprocess import preprocess_page, preprocess_pdf
 
 CROP_SIZE = 32
