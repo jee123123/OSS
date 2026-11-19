@@ -42,6 +42,34 @@ class BeamRecoveryTest(unittest.TestCase):
         self.assertEqual(page_width, 1000)
         self.assertEqual(regions[(1, 1)].x, 0)
 
+    def test_measure_regions_combines_layout_from_split_parts(self) -> None:
+        xml = """\
+<score-partwise version="4.0">
+  <defaults><page-layout><page-width>1000</page-width></page-layout></defaults>
+  <part-list>
+    <score-part id="P1"><part-name>Upper</part-name></score-part>
+    <score-part id="P2"><part-name>Lower</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1" width="0"/>
+    <measure number="2" width="200"/>
+  </part>
+  <part id="P2">
+    <measure number="1" width="100"/>
+    <measure number="2" width="0"/>
+  </part>
+</score-partwise>
+"""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "score.musicxml"
+            path.write_text(xml, encoding="utf-8")
+
+            _, regions = _measure_regions(path)
+
+        self.assertEqual(regions[(1, 1)].width, 100)
+        self.assertEqual(regions[(1, 2)].x, 100)
+        self.assertEqual(regions[(1, 2)].width, 200)
+
     def test_detects_staff_lines(self) -> None:
         image = np.full((120, 240), 255, dtype=np.uint8)
         for y in (40, 48, 56, 64, 72):

@@ -3,7 +3,7 @@
 from copy import deepcopy
 from fractions import Fraction
 
-from music21 import stream
+from music21 import harmony, stream
 
 SHORT_NOTE_LIMIT = Fraction(2, 3)
 MIN_SHORT_NOTE_GAIN = 1
@@ -34,6 +34,48 @@ def _measure_rhythm_error(measure: stream.Measure) -> Fraction:
 
 def _measure_key(measure: stream.Measure) -> tuple[str, str]:
     return str(measure.number), str(measure.numberSuffix or "")
+
+
+def _sounding_notes(measure: stream.Measure):
+    return [
+        event
+        for event in measure.recurse().notes
+        if not isinstance(event, harmony.ChordSymbol)
+    ]
+
+
+def _preserve_matching_pitches(
+    primary: stream.Measure,
+    replacement: stream.Measure,
+) -> None:
+    remaining = _sounding_notes(replacement)
+    used: set[int] = set()
+
+    for source in _sounding_notes(primary):
+        source_x = source.style.absoluteX
+        candidate = min(
+            (
+                event
+                for event in remaining
+                if id(event) not in used
+                and source_x is not None
+                and event.style.absoluteX is not None
+                and abs(float(event.style.absoluteX) - float(source_x)) <= 8
+            ),
+            key=lambda event: abs(
+                float(event.style.absoluteX) - float(source_x)
+            ),
+            default=None,
+        )
+        if candidate is None:
+            continue
+
+        source_pitches = list(source.pitches)
+        candidate_pitches = list(candidate.pitches)
+        if len(source_pitches) != len(candidate_pitches):
+            continue
+        candidate.pitches = [deepcopy(pitch) for pitch in source_pitches]
+        used.add(id(candidate))
 
 
 def recover_missing_short_notes(
@@ -83,6 +125,10 @@ def recover_missing_short_notes(
                 recovered_rests < 0
                 or alternative_count < primary_count
                 or (
+                    alternative_count == primary_count
+                    and recovered_rests <= 0
+                )
+                or (
                     recovered_count < MIN_SHORT_NOTE_GAIN
                     and not (
                         recovered_rests > 0
@@ -103,6 +149,7 @@ def recover_missing_short_notes(
 
             measure_offset = primary_measure.offset
             replacement = deepcopy(alternative_measure)
+            _preserve_matching_pitches(primary_measure, replacement)
 
             primary_part.remove(primary_measure)
             primary_part.insert(measure_offset, replacement)

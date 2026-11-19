@@ -45,9 +45,22 @@ def _measure_regions(
     page_width = float(
         root.findtext("./defaults/page-layout/page-width") or 1
     )
-    first_part = root.find("part")
-    if first_part is None:
+    parts = root.findall("part")
+    if not parts:
         return page_width, {}
+    part_measures = [part.findall("measure") for part in parts]
+    measure_count = max(map(len, part_measures))
+    layout_measures = [
+        max(
+            (
+                measures[index]
+                for measures in part_measures
+                if index < len(measures)
+            ),
+            key=lambda measure: float(measure.get("width") or 0),
+        )
+        for index in range(measure_count)
+    ]
 
     page = 1
     system = 0
@@ -55,7 +68,7 @@ def _measure_regions(
     x = 0.0
     regions: dict[tuple[int, int], _MeasureRegion] = {}
 
-    for index, measure in enumerate(first_part.findall("measure"), 1):
+    for index, measure in enumerate(layout_measures, 1):
         print_element = measure.find("print")
         new_page = (
             print_element is not None

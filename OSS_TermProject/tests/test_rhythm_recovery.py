@@ -8,6 +8,42 @@ from score2midi.rhythm_recovery import recover_missing_short_notes
 
 
 class RhythmRecoveryTest(unittest.TestCase):
+    def test_recovery_preserves_pitches_at_existing_image_positions(self) -> None:
+        primary = stream.Score()
+        primary_part = stream.Part()
+        primary_measure = stream.Measure(number=1)
+        primary_measure.insert(0, meter.TimeSignature("4/4"))
+        for offset, pitch, x in ((0, "C4", 10), (2, "E4", 30)):
+            event = note.Note(pitch, quarterLength=2)
+            event.style.absoluteX = x
+            primary_measure.insert(offset, event)
+        primary_part.append(primary_measure)
+        primary.insert(0, primary_part)
+
+        alternative = stream.Score()
+        alternative_part = stream.Part()
+        alternative_measure = stream.Measure(number=1)
+        alternative_measure.insert(0, meter.TimeSignature("4/4"))
+        for offset, pitch, duration, x in (
+            (0, "D4", Fraction(1, 2), 10),
+            (Fraction(1, 2), "G4", Fraction(1, 2), 20),
+            (1, "A4", 1, 25),
+            (2, "F4", 2, 30),
+        ):
+            event = note.Note(pitch, quarterLength=duration)
+            event.style.absoluteX = x
+            alternative_measure.insert(offset, event)
+        alternative_part.append(alternative_measure)
+        alternative.insert(0, alternative_part)
+
+        warnings = recover_missing_short_notes(primary, alternative)
+
+        self.assertEqual(
+            [event.pitch.nameWithOctave for event in primary_part.measure(1).notes],
+            ["C4", "G4", "A4", "E4"],
+        )
+        self.assertTrue(warnings)
+
     def test_recovers_sequential_triplet_from_misread_chord(self) -> None:
         primary = stream.Score()
         primary_part = stream.Part()
@@ -59,15 +95,15 @@ class RhythmRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("짧은 음표" in warning for warning in warnings))
 
-    def test_replaces_equal_note_count_when_rhythm_is_more_accurate(
+    def test_does_not_replace_equal_note_count_with_different_pitches(
         self,
     ) -> None:
         primary = stream.Score()
         primary_part = stream.Part()
         primary_measure = stream.Measure(number=1)
         primary_measure.insert(0, meter.TimeSignature("4/4"))
-        for offset in range(5):
-            primary_measure.insert(offset, note.Note("C4", quarterLength=1))
+        for offset, pitch in enumerate(("C4", "D4", "E4", "F4", "G4")):
+            primary_measure.insert(offset, note.Note(pitch, quarterLength=1))
         primary_part.append(primary_measure)
         primary.insert(0, primary_part)
 
@@ -84,7 +120,7 @@ class RhythmRecoveryTest(unittest.TestCase):
         ):
             alternative_measure.insert(
                 offset,
-                note.Note("C4", quarterLength=duration),
+                note.Note("D4", quarterLength=duration),
             )
         alternative_part.append(alternative_measure)
         alternative.insert(0, alternative_part)
@@ -92,8 +128,12 @@ class RhythmRecoveryTest(unittest.TestCase):
         warnings = recover_missing_short_notes(primary, alternative)
 
         recovered_measure = primary_part.measure(1)
-        self.assertEqual(recovered_measure.highestTime, 4)
-        self.assertTrue(any("짧은 음표" in warning for warning in warnings))
+        self.assertEqual(recovered_measure.highestTime, 5)
+        self.assertEqual(
+            [event.pitch.nameWithOctave for event in recovered_measure.notes],
+            ["C4", "D4", "E4", "F4", "G4"],
+        )
+        self.assertEqual(warnings, [])
 
     def test_appends_trailing_measure_missing_from_primary(self) -> None:
         primary = stream.Score()

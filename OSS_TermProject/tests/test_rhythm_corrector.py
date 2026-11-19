@@ -7,6 +7,30 @@ from score2midi.rhythm_corrector import correct_rhythm
 
 
 class RhythmCorrectorTest(unittest.TestCase):
+    def test_preserves_one_measure_three_eight_meter_change(self) -> None:
+        score = stream.Score()
+        for pitch in ("C5", "C3"):
+            part = stream.Part()
+            first = stream.Measure(number=1)
+            first.timeSignature = meter.TimeSignature("6/8")
+            first.append(note.Note(pitch, quarterLength=3))
+            short = stream.Measure(number=2)
+            for offset in (0, Fraction(1, 2), Fraction(1)):
+                short.insert(offset, note.Note(pitch, quarterLength=Fraction(1, 2)))
+            restored = stream.Measure(number=3)
+            restored.timeSignature = meter.TimeSignature("6/8")
+            restored.append(note.Note(pitch, quarterLength=3))
+            part.append([first, short, restored])
+            score.insert(0, part)
+
+        correct_rhythm(score)
+
+        for part in score.parts:
+            short = part.measure(2)
+            signatures = list(short.getElementsByClass(meter.TimeSignature))
+            self.assertEqual([item.ratioString for item in signatures], ["3/8"])
+            self.assertEqual(part.measure(3).offset, Fraction(9, 2))
+
     def test_does_not_modify_tuplet_measure(self) -> None:
         score = stream.Score()
         part = stream.Part()

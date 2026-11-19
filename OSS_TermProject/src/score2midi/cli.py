@@ -13,6 +13,8 @@ from PIL import Image, ImageChops
 
 from score2midi.articulation import separate_repeated_notes
 from score2midi.beam_recovery import recover_unplaced_beamed_notes
+from score2midi.navigation import prepare_playback_score
+from score2midi.navigation_vision import detect_navigation_plan
 from score2midi.preprocess import (
     preprocess_page,
     preprocess_pdf,
@@ -318,12 +320,6 @@ def convert_pages(
 
         part_mapping, part_warnings = consolidate_split_piano_parts(score)
         conversion_warnings.extend(part_warnings)
-        if part_warnings:
-            conversion_warnings.append(
-                "연주 순서 기호가 MusicXML에 없으면 MIDI는 지면 순서대로 "
-                "생성됩니다. D.S., D.S.S., Coda, Fine이 있는 악보는 "
-                "저장된 MusicXML을 검토하세요."
-            )
 
         for sheet, measure, part_number in sorted(
             unplaced_chords - recovered_chords
@@ -355,7 +351,31 @@ def convert_pages(
             else:
                 part.insert(0, instrument.Piano())
         score.write("musicxml", fp=str(output.with_suffix(".musicxml")))
-        score.write("midi", fp=str(output))
+        navigation_plan = None
+        try:
+            navigation_plan, navigation_detection_warnings = (
+                detect_navigation_plan(
+                    score,
+                    input_document,
+                    primary_musicxml,
+                )
+            )
+            conversion_warnings.extend(navigation_detection_warnings)
+        except (OSError, ValueError, IndexError, StopIteration) as error:
+            conversion_warnings.append(
+                f"연주 순서 기호 인식을 건너뛰었습니다: {error}"
+            )
+        if navigation_plan is None and part_warnings:
+            conversion_warnings.append(
+                "연주 순서 기호를 찾지 못해 MIDI를 지면 순서대로 "
+                "생성했습니다. 저장된 MusicXML을 검토하세요."
+            )
+        playback_score, navigation_warnings = prepare_playback_score(
+            score,
+            navigation_plan,
+        )
+        conversion_warnings.extend(navigation_warnings)
+        playback_score.write("midi", fp=str(output))
 
         details = conversion_warnings + review_warnings
         if details:

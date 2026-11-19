@@ -3,7 +3,15 @@ from __future__ import annotations
 from copy import deepcopy
 from statistics import median
 
-from music21 import instrument, stream
+from music21 import harmony, instrument, stream
+
+
+def _sounding_notes(source):
+    return (
+        element
+        for element in source.recurse().notes
+        if not isinstance(element, harmony.ChordSymbol)
+    )
 
 
 def _measure_key(measure: stream.Measure) -> tuple[str, str]:
@@ -14,13 +22,13 @@ def _occupied_measure_keys(part: stream.Part) -> set[tuple[str, str]]:
     return {
         _measure_key(measure)
         for measure in part.getElementsByClass(stream.Measure)
-        if any(measure.recurse().notes)
+        if any(_sounding_notes(measure))
     }
 
 
 def _median_pitch(part: stream.Part) -> float | None:
     pitches: list[float] = []
-    for element in part.recurse().notes:
+    for element in _sounding_notes(part):
         if hasattr(element, "pitches"):
             pitches.extend(float(pitch.midi) for pitch in element.pitches)
         elif hasattr(element, "pitch"):
@@ -65,14 +73,14 @@ def _merge_parts(parts: list[stream.Part], part_id: str) -> stream.Part:
             if key in measures
         ]
         nonempty = [
-            measure for measure in candidates if any(measure.recurse().notes)
+            measure for measure in candidates if any(_sounding_notes(measure))
         ]
         if not nonempty:
             continue
 
         replacement = max(
             nonempty,
-            key=lambda measure: sum(1 for _ in measure.recurse().notes),
+            key=lambda measure: sum(1 for _ in _sounding_notes(measure)),
         )
         if replacement is current:
             continue

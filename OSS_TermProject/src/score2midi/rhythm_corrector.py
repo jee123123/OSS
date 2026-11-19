@@ -3,7 +3,7 @@
 from collections import Counter
 from fractions import Fraction
 
-from music21 import stream
+from music21 import meter, stream
 
 GRID_DIVISORS = (4, 3, 8)
 SNAP_TOLERANCE = Fraction(1, 32)
@@ -130,6 +130,7 @@ def _choose_measure_duration(
     measures: list[stream.Measure],
     measure_index: int,
     warnings: list[str],
+    next_measures: list[stream.Measure] | None = None,
 ) -> Fraction:
     bar_durations = [
         Fraction(measure.barDuration.quarterLength)
@@ -173,7 +174,78 @@ def _choose_measure_duration(
                 f"{float(duration):g}박으로 통일했습니다."
             )
 
+    direct_signatures = [
+        signature
+        for measure in measures
+        for signature in measure.getElementsByClass(meter.TimeSignature)
+    ]
+    if direct_signatures:
+        signature_durations = [
+            Fraction(signature.barDuration.quarterLength)
+            for signature in direct_signatures
+        ]
+        duration = Counter(signature_durations).most_common(1)[0][0]
+    elif next_measures:
+        next_signatures = [
+            signature
+            for measure in next_measures
+            for signature in measure.getElementsByClass(meter.TimeSignature)
+        ]
+        actual_durations = [
+            Fraction(measure.highestTime)
+            for measure in measures
+            if measure.highestTime
+        ]
+        if (
+            next_signatures
+            and actual_durations
+            and len(actual_durations) == len(measures)
+            and len(set(actual_durations)) == 1
+            and actual_durations[0] < duration
+            and all(
+                Fraction(signature.barDuration.quarterLength) == duration
+                for signature in next_signatures
+            )
+        ):
+            duration = actual_durations[0]
+
     return duration
+
+
+def _time_signature_for_duration(duration: Fraction) -> str | None:
+    signatures = {
+        Fraction(1): "2/8",
+        Fraction(3, 2): "3/8",
+        Fraction(2): "2/4",
+        Fraction(3): "6/8",
+        Fraction(4): "4/4",
+    }
+    return signatures.get(duration)
+
+
+def _materialize_inferred_time_signature(
+    measures: list[stream.Measure],
+    expected_duration: Fraction,
+) -> None:
+    if any(
+        measure.getElementsByClass(meter.TimeSignature)
+        for measure in measures
+    ):
+        return
+
+    inherited_durations = {
+        Fraction(measure.barDuration.quarterLength)
+        for measure in measures
+    }
+    if inherited_durations == {expected_duration}:
+        return
+
+    ratio = _time_signature_for_duration(expected_duration)
+    if ratio is None:
+        return
+
+    for measure in measures:
+        measure.insert(0, meter.TimeSignature(ratio))
 
 
 def correct_rhythm(score: stream.Score) -> list[str]:
@@ -203,6 +275,15 @@ def correct_rhythm(score: stream.Score) -> list[str]:
             current_measures,
             measure_index,
             warnings,
+            [
+                measures[measure_index + 1]
+                for measures in part_measures
+                if measure_index + 1 < len(measures)
+            ],
+        )
+        _materialize_inferred_time_signature(
+            current_measures,
+            expected_duration,
         )
 
         for part_number, (part, measures) in enumerate(
