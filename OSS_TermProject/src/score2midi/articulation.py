@@ -36,46 +36,50 @@ def _forms_true_tie(
 def separate_repeated_notes(score: stream.Score) -> list[str]:
     corrected_count = 0
 
-    for measure in score.recurse().getElementsByClass(stream.Measure):
-        voices = list(measure.getElementsByClass(stream.Voice))
-        containers = voices or [measure]
+    for part in score.parts:
+        events = list(part.recurse().notes)
+        starts: dict[Fraction, list] = {}
 
-        for container in containers:
-            events = list(container.notes)
+        for event in events:
+            start = Fraction(event.getOffsetInHierarchy(part))
+            starts.setdefault(start, []).append(event)
 
-            for left, right in zip(events, events[1:]):
-                left_end = (
-                    Fraction(left.offset)
-                    + Fraction(left.duration.quarterLength)
-                )
+        for left in events:
+            left_start = Fraction(left.getOffsetInHierarchy(part))
+            duration = Fraction(left.duration.quarterLength)
+            left_end = left_start + duration
+            right_events = starts.get(left_end, [])
 
-                if left_end != Fraction(right.offset):
-                    continue
+            if not right_events:
+                continue
 
-                left_notes = _pitched_notes(left)
+            left_notes = _pitched_notes(left)
+            should_separate = False
+
+            for right in right_events:
                 right_notes = _pitched_notes(right)
                 shared_pitches = left_notes.keys() & right_notes.keys()
 
-                if not shared_pitches:
-                    continue
-
-                if any(
+                if shared_pitches and not any(
                     _forms_true_tie(
                         left_notes[pitch],
                         right_notes[pitch],
                     )
                     for pitch in shared_pitches
                 ):
-                    continue
+                    should_separate = True
+                    break
 
-                duration = Fraction(left.duration.quarterLength)
-                gap = min(REPEATED_NOTE_GAP, duration / 8)
+            if not should_separate:
+                continue
 
-                if duration <= gap:
-                    continue
+            gap = min(REPEATED_NOTE_GAP, duration / 8)
 
-                left.duration.quarterLength = duration - gap
-                corrected_count += 1
+            if duration <= gap:
+                continue
+
+            left.duration.quarterLength = duration - gap
+            corrected_count += 1
 
     if corrected_count == 0:
         return []

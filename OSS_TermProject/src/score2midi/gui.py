@@ -5,17 +5,21 @@ from __future__ import annotations
 import shutil
 import sys
 import re
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PIL.ImageQt import ImageQt
+from PySide6.QtCore import QSettings, QSize, QThread, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -30,6 +34,13 @@ from PySide6.QtWidgets import (
 )
 
 from score2midi.cli import convert_pages, rewrite_midi_tempo
+from score2midi.page_editor import (
+    PageSpec,
+    load_page_image,
+    pages_for_file,
+    prepare_conversion_inputs,
+)
+from score2midi.preprocess import preprocess_page
 
 
 def _result_summary(details: str) -> str:
@@ -58,25 +69,27 @@ class ConversionWorker(QThread):
 
     def __init__(
         self,
-        images: list[Path],
+        pages: list[PageSpec],
         output: Path,
         audiveris: str,
         bpm: int,
     ):
         super().__init__()
-        self.images = images
+        self.pages = pages
         self.output = output
         self.audiveris = audiveris
         self.bpm = bpm
 
     def run(self) -> None:
         try:
-            convert_pages(
-                self.images,
-                self.output,
-                self.audiveris,
-                self.bpm,
-            )
+            with tempfile.TemporaryDirectory(prefix="score2midi-pages-") as directory:
+                inputs = prepare_conversion_inputs(self.pages, Path(directory))
+                convert_pages(
+                    inputs,
+                    self.output,
+                    self.audiveris,
+                    self.bpm,
+                )
         except Exception as error:
             log_path = self.output.with_suffix(".txt")
             try:
@@ -93,7 +106,7 @@ class Score2MidiWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Score2MIDI")
-        self.resize(760, 520)
+        self.resize(1050, 800)
 
         self.output_dir = Path.cwd() / "outputs"
         self.settings = QSettings("Score2MIDI", "Score2MIDI")
@@ -103,6 +116,22 @@ class Score2MidiWindow(QMainWindow):
         self.current_output: Path | None = None
 
         self.file_list = QListWidget()
+        self.file_list.setViewMode(QListView.ViewMode.IconMode)
+        self.file_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.file_list.setMovement(QListView.Movement.Snap)
+        self.file_list.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove
+        )
+        self.file_list.setIconSize(QSize(110, 145))
+        self.file_list.setMinimumHeight(190)
+        self.file_list.currentItemChanged.connect(self.show_page_preview)
+        self.original_preview = QLabel("원본 미리보기")
+        self.processed_preview = QLabel("전처리 미리보기")
+        self.preview_info = QLabel("페이지를 선택하세요.")
+        for preview in self.original_preview, self.processed_preview:
+            preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            preview.setMinimumSize(260, 260)
+            preview.setStyleSheet("border: 1px solid #999;")
         self.progress = QProgressBar()
         self.status_label = QLabel("대기 중")
         self.output_name = QLineEdit("score.mid")
@@ -117,6 +146,8 @@ class Score2MidiWindow(QMainWindow):
         self.remove_button = QPushButton("선택 삭제")
         self.move_up_button = QPushButton("위로")
         self.move_down_button = QPushButton("아래로")
+        self.rotate_left_button = QPushButton("왼쪽 회전")
+        self.rotate_right_button = QPushButton("오른쪽 회전")
         self.audiveris_button = QPushButton("Audiveris 선택")
         self.output_button = QPushButton("저장 폴더 선택")
         self.convert_button = QPushButton("변환 시작")
@@ -125,6 +156,8 @@ class Score2MidiWindow(QMainWindow):
         self.remove_button.clicked.connect(self.remove_selected)
         self.move_up_button.clicked.connect(lambda: self.move_selected(-1))
         self.move_down_button.clicked.connect(lambda: self.move_selected(1))
+        self.rotate_left_button.clicked.connect(lambda: self.rotate_selected(-90))
+        self.rotate_right_button.clicked.connect(lambda: self.rotate_selected(90))
         self.audiveris_button.clicked.connect(self.choose_audiveris)
         self.output_button.clicked.connect(self.choose_output_dir)
         self.convert_button.clicked.connect(self.start_conversion)
@@ -139,8 +172,14 @@ class Score2MidiWindow(QMainWindow):
             self.remove_button,
             self.move_up_button,
             self.move_down_button,
+            self.rotate_left_button,
+            self.rotate_right_button,
         ):
             page_buttons.addWidget(button)
+
+        preview_layout = QHBoxLayout()
+        preview_layout.addWidget(self.original_preview)
+        preview_layout.addWidget(self.processed_preview)
 
         output_name_layout = QHBoxLayout()
         output_name_layout.addWidget(QLabel("결과 파일 이름:"))
@@ -164,6 +203,8 @@ class Score2MidiWindow(QMainWindow):
         )
         layout.addWidget(self.file_list)
         layout.addLayout(page_buttons)
+        layout.addLayout(preview_layout)
+        layout.addWidget(self.preview_info)
         layout.addLayout(audiveris_layout)
         layout.addLayout(output_name_layout)
         layout.addWidget(self.output_label)
@@ -264,20 +305,95 @@ class Score2MidiWindow(QMainWindow):
             "악보 파일 (*.pdf *.png *.jpg *.jpeg *.tif *.tiff)",
         )
         existing = {
-            self.file_list.item(i).data(Qt.ItemDataRole.UserRole)
+            self.file_list.item(i).data(Qt.ItemDataRole.UserRole).source.resolve()
             for i in range(self.file_list.count())
         }
         for filename in filenames:
             path = Path(filename)
-            if str(path) in existing:
+            if path.resolve() in existing:
                 continue
-            item = QListWidgetItem(str(path))
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            self.file_list.addItem(item)
+            try:
+                specs = pages_for_file(path)
+            except (OSError, ValueError) as error:
+                QMessageBox.warning(self, "악보 열기 실패", str(error))
+                continue
+            for spec in specs:
+                self.add_page_item(spec)
+            existing.add(path.resolve())
+        if self.file_list.count() and self.file_list.currentRow() < 0:
+            self.file_list.setCurrentRow(0)
+
+    def add_page_item(self, spec: PageSpec) -> None:
+        item = QListWidgetItem(spec.label)
+        item.setData(Qt.ItemDataRole.UserRole, spec)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.update_page_item(item)
+        self.file_list.addItem(item)
+
+    def update_page_item(self, item: QListWidgetItem) -> None:
+        spec = item.data(Qt.ItemDataRole.UserRole)
+        image = load_page_image(spec, dpi=72)
+        try:
+            image.thumbnail((110, 145))
+            item.setIcon(QIcon(QPixmap.fromImage(ImageQt(image))))
+            item.setText(spec.label)
+        finally:
+            image.close()
+
+    def show_page_preview(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None = None,
+    ) -> None:
+        if current is None:
+            self.original_preview.clear()
+            self.processed_preview.clear()
+            self.preview_info.setText("페이지를 선택하세요.")
+            return
+        spec = current.data(Qt.ItemDataRole.UserRole)
+        original = load_page_image(spec)
+        processed = preprocess_page(original)
+        try:
+            self.set_preview_image(self.original_preview, original)
+            self.set_preview_image(self.processed_preview, processed)
+            source_type = "PDF" if spec.page_index is not None else "이미지"
+            low_resolution = (
+                " · 낮은 해상도: 변환 시 자동 확대"
+                if spec.page_index is None and max(original.size) < 1500
+                else ""
+            )
+            self.preview_info.setText(
+                f"{source_type} · {original.width}×{original.height}px"
+                f" · 회전 {spec.rotation}°{low_resolution}"
+            )
+        finally:
+            original.close()
+            if processed is not original:
+                processed.close()
+
+    @staticmethod
+    def set_preview_image(label: QLabel, image) -> None:
+        preview = image.copy()
+        try:
+            preview.thumbnail((340, 300))
+            label.setPixmap(QPixmap.fromImage(ImageQt(preview)))
+        finally:
+            preview.close()
+
+    def rotate_selected(self, degrees: int) -> None:
+        item = self.file_list.currentItem()
+        if item is None:
+            return
+        spec = item.data(Qt.ItemDataRole.UserRole).rotate(degrees)
+        item.setData(Qt.ItemDataRole.UserRole, spec)
+        self.update_page_item(item)
+        self.show_page_preview(item)
 
     def remove_selected(self) -> None:
         for item in self.file_list.selectedItems():
             self.file_list.takeItem(self.file_list.row(item))
+        if self.file_list.count() and self.file_list.currentRow() < 0:
+            self.file_list.setCurrentRow(0)
 
     def move_selected(self, offset: int) -> None:
         row = self.file_list.currentRow()
@@ -327,18 +443,23 @@ class Score2MidiWindow(QMainWindow):
             )
             return
 
-        images = [
-            Path(self.file_list.item(i).data(Qt.ItemDataRole.UserRole))
+        page_specs = [
+            self.file_list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(self.file_list.count())
         ]
-        if not images:
+        if not page_specs:
             QMessageBox.information(self, "악보 없음", "먼저 악보 파일을 추가하세요.")
             return
 
-        pdf_inputs = [
-            image for image in images if image.suffix.lower() == ".pdf"
-        ]
-        if pdf_inputs and len(images) != 1:
+        pdf_sources = {
+            spec.source.resolve()
+            for spec in page_specs
+            if spec.page_index is not None
+        }
+        if pdf_sources and (
+            len(pdf_sources) != 1
+            or any(spec.page_index is None for spec in page_specs)
+        ):
             QMessageBox.warning(
                 self,
                 "입력 형식 오류",
@@ -378,7 +499,7 @@ class Score2MidiWindow(QMainWindow):
         self.settings.setValue("bpm", bpm)
 
         self.worker = ConversionWorker(
-            images,
+            page_specs,
             output,
             self.audiveris,
             bpm,
@@ -394,6 +515,8 @@ class Score2MidiWindow(QMainWindow):
             self.remove_button,
             self.move_up_button,
             self.move_down_button,
+            self.rotate_left_button,
+            self.rotate_right_button,
             self.audiveris_button,
             self.output_button,
             self.convert_button,

@@ -21,6 +21,7 @@ from score2midi.preprocess import (
 )
 from score2midi.part_consolidation import consolidate_split_piano_parts
 from score2midi.rhythm_corrector import correct_rhythm
+from score2midi.timing_guard import stabilize_note_timing
 from score2midi.rhythm_recovery import recover_missing_short_notes
 
 NO_TIME_OFFSET_PATTERN = re.compile(
@@ -348,6 +349,7 @@ def convert_pages(
             )
 
         conversion_warnings.extend(correct_rhythm(score))
+        conversion_warnings.extend(stabilize_note_timing(score))
         conversion_warnings.extend(separate_repeated_notes(score))
         _set_tempo(score, bpm)
         for part in score.parts:

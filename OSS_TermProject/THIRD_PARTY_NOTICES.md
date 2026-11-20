@@ -11,6 +11,7 @@ retain their own licenses; this repository does not relicense them.
 | OpenCV (`opencv-python`) | Apache-2.0 | Used by the legacy image-processing code. | <https://github.com/opencv/opencv> |
 | NumPy | BSD-3-Clause | Used by the legacy image-processing code and OpenCV. | <https://github.com/numpy/numpy> |
 | Pillow | MIT-CMU | Image loading and processing dependency. | <https://github.com/python-pillow/Pillow> |
+| pypdf | BSD-3-Clause | Reorders and rotates selected PDF pages without rasterizing them. | <https://github.com/py-pdf/pypdf> |
 
 See each project for its complete license text and any notices that apply to a
 particular release or binary distribution. No Audiveris binary is included in

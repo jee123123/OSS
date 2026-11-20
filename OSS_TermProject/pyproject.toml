@@ -16,6 +16,7 @@ dependencies = [
     "opencv-python>=4.8",
     "Pillow>=10.0",
     "pypdfium2>=4.30",
+    "pypdf>=5.9",
     "tesserocr>=2.13",
 ]
 
