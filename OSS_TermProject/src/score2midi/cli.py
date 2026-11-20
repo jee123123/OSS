@@ -56,6 +56,15 @@ def _set_tempo(score, bpm: int) -> None:
     score.insert(0, tempo.MetronomeMark(number=bpm))
 
 
+def rewrite_midi_tempo(source: Path, output: Path, bpm: int) -> None:
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    score = converter.parse(str(source))
+    _set_tempo(score, bpm)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    score.write("midi", fp=str(output))
+
+
 def _load_notehead_predictor(note_model: Path | None):
     if note_model is None:
         return None, None

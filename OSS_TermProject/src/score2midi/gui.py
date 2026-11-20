@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import shutil
 import sys
+import re
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QThread, Qt, Signal
+from PySide6.QtCore import QSettings, QThread, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -20,11 +23,31 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from score2midi.cli import convert_pages
+from score2midi.cli import convert_pages, rewrite_midi_tempo
+
+
+def _result_summary(details: str) -> str:
+    route = re.search(
+        r"(\d+)마디를 (\d+)마디의 재생 순서로 전개",
+        details,
+    )
+    measure_reports = sum(
+        "마디" in line
+        for line in details.splitlines()
+        if line.strip()
+    )
+    playback = (
+        f"인식 {route.group(1)}마디 → 재생 {route.group(2)}마디"
+        if route
+        else "연주 순서: 지면 순서 또는 MusicXML 기호 기준"
+    )
+    return f"{playback} · 마디 관련 보고 {measure_reports}건"
 
 
 class ConversionWorker(QThread):
@@ -77,6 +100,7 @@ class Score2MidiWindow(QMainWindow):
         self.audiveris = str(
             self.settings.value("audiveris_path", "audiveris")
         )
+        self.current_output: Path | None = None
 
         self.file_list = QListWidget()
         self.progress = QProgressBar()
@@ -147,9 +171,90 @@ class Score2MidiWindow(QMainWindow):
         layout.addWidget(self.progress)
         layout.addLayout(buttons)
 
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
+        self.input_page = QWidget()
+        self.input_page.setLayout(layout)
+        self.result_page = self.build_result_page()
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.input_page)
+        self.pages.addWidget(self.result_page)
+        self.setCentralWidget(self.pages)
+
+    def build_result_page(self) -> QWidget:
+        self.result_path_label = QLabel()
+        self.result_path_label.setWordWrap(True)
+        self.result_summary_label = QLabel()
+        self.report_view = QTextEdit()
+        self.report_view.setReadOnly(True)
+
+        self.play_button = QPushButton("재생")
+        self.pause_button = QPushButton("일시정지")
+        self.stop_button = QPushButton("정지")
+        self.open_midi_button = QPushButton("MIDI 열기")
+        self.open_xml_button = QPushButton("MusicXML 열기")
+        self.open_report_button = QPushButton("보고서 열기")
+        self.open_folder_button = QPushButton("출력 폴더 열기")
+        self.new_conversion_button = QPushButton("다른 악보 변환")
+        self.result_bpm_input = QSpinBox()
+        self.result_bpm_input.setRange(20, 300)
+        self.result_bpm_input.setSuffix(" BPM")
+        self.save_bpm_button = QPushButton("새 BPM으로 저장")
+
+        self.audio_output = QAudioOutput(self)
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(0.8)
+        self.player.errorOccurred.connect(self.playback_failed)
+
+        self.play_button.clicked.connect(self.play_result)
+        self.pause_button.clicked.connect(self.player.pause)
+        self.stop_button.clicked.connect(self.player.stop)
+        self.open_midi_button.clicked.connect(
+            lambda: self.open_result_file(".mid")
+        )
+        self.open_xml_button.clicked.connect(
+            lambda: self.open_result_file(".musicxml")
+        )
+        self.open_report_button.clicked.connect(
+            lambda: self.open_result_file(".txt")
+        )
+        self.open_folder_button.clicked.connect(self.open_output_folder)
+        self.save_bpm_button.clicked.connect(self.save_with_bpm)
+        self.new_conversion_button.clicked.connect(
+            self.start_new_conversion
+        )
+
+        playback_layout = QHBoxLayout()
+        for button in self.play_button, self.pause_button, self.stop_button:
+            playback_layout.addWidget(button)
+
+        file_layout = QHBoxLayout()
+        for button in (
+            self.open_midi_button,
+            self.open_xml_button,
+            self.open_report_button,
+            self.open_folder_button,
+        ):
+            file_layout.addWidget(button)
+
+        bpm_layout = QHBoxLayout()
+        bpm_layout.addWidget(QLabel("출력 속도:"))
+        bpm_layout.addWidget(self.result_bpm_input)
+        bpm_layout.addWidget(self.save_bpm_button)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("변환 결과"))
+        layout.addWidget(self.result_path_label)
+        layout.addWidget(self.result_summary_label)
+        layout.addLayout(playback_layout)
+        layout.addLayout(file_layout)
+        layout.addLayout(bpm_layout)
+        layout.addWidget(QLabel("변환 보고서"))
+        layout.addWidget(self.report_view)
+        layout.addWidget(self.new_conversion_button)
+
+        page = QWidget()
+        page.setLayout(layout)
+        return page
 
     def add_files(self) -> None:
         filenames, _ = QFileDialog.getOpenFileNames(
@@ -301,17 +406,86 @@ class Score2MidiWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.status_label.setText(f"완료: {output}")
-        musicxml_path = Path(output).with_suffix(".musicxml")
-        details_path = Path(output).with_suffix(".txt")
+        self.show_result(Path(output))
 
-        message = (
-            f"MIDI와 MusicXML 파일로 변환했습니다.\n\n"
-            f"MIDI: {output}\n"
-            f"MusicXML: {musicxml_path}"
+    def show_result(self, output: Path) -> None:
+        self.current_output = output
+        details_path = output.with_suffix(".txt")
+        try:
+            details = details_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            details = "별도의 변환 경고가 없습니다."
+        except OSError as error:
+            details = f"보고서를 읽을 수 없습니다: {error}"
+
+        self.result_path_label.setText(f"MIDI: {output}")
+        self.result_summary_label.setText(_result_summary(details))
+        self.report_view.setPlainText(details)
+        self.result_bpm_input.setValue(self.bpm_input.value())
+        self.open_xml_button.setEnabled(output.with_suffix(".musicxml").is_file())
+        self.open_report_button.setEnabled(details_path.is_file())
+        self.player.stop()
+        self.pages.setCurrentWidget(self.result_page)
+
+    def play_result(self) -> None:
+        if self.current_output is not None:
+            source = QUrl.fromLocalFile(str(self.current_output.resolve()))
+            if self.player.source() != source:
+                self.player.setSource(source)
+            self.player.play()
+
+    def start_new_conversion(self) -> None:
+        self.player.stop()
+        self.pages.setCurrentWidget(self.input_page)
+
+    def playback_failed(self, _error, message: str) -> None:
+        QMessageBox.warning(
+            self,
+            "내장 재생 불가",
+            f"이 환경에서는 MIDI를 바로 재생할 수 없습니다.\n{message}\n\n"
+            "MIDI 열기 버튼으로 시스템 기본 앱을 사용하세요.",
         )
-        if details_path.is_file():
-            message += f"\n\n세부 내용은 {details_path.name}을 참고하세요."
-        QMessageBox.information(self, "변환 완료", message)
+
+    def open_result_file(self, suffix: str) -> None:
+        if self.current_output is None:
+            return
+        path = self.current_output.with_suffix(suffix)
+        if path.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+    def open_output_folder(self) -> None:
+        if self.current_output is not None:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(self.current_output.parent.resolve()))
+            )
+
+    def save_with_bpm(self) -> None:
+        if self.current_output is None:
+            return
+        suggested = self.current_output.with_name(
+            f"{self.current_output.stem}_{self.result_bpm_input.value()}bpm.mid"
+        )
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "BPM을 변경한 MIDI 저장",
+            str(suggested),
+            "MIDI 파일 (*.mid)",
+        )
+        if not filename:
+            return
+        output = Path(filename)
+        if output.suffix.lower() != ".mid":
+            output = output.with_suffix(".mid")
+        try:
+            rewrite_midi_tempo(
+                self.current_output,
+                output,
+                self.result_bpm_input.value(),
+            )
+        except Exception as error:
+            QMessageBox.critical(self, "BPM 저장 실패", str(error))
+            return
+        QMessageBox.information(self, "저장 완료", f"저장했습니다:\n{output}")
 
     def conversion_failed(self, error: str) -> None:
         self.progress.setRange(0, 100)
@@ -328,6 +502,7 @@ class Score2MidiWindow(QMainWindow):
             )
             event.ignore()
             return
+        self.player.stop()
         event.accept()
 
 
