@@ -7,6 +7,7 @@ from music21 import meter, stream
 
 GRID_DIVISORS = (4, 3, 8)
 SNAP_TOLERANCE = Fraction(1, 32)
+GRACE_PLAYBACK_DURATION = Fraction(1, 8)
 ALLOWED_DURATIONS = frozenset(
     {
         Fraction(1, 8),
@@ -62,6 +63,97 @@ def _contains_tuplets(measure: stream.Measure) -> bool:
         element.duration.tuplets
         for element in measure.recurse().notesAndRests
     )
+
+
+def _measure_containers(
+    measures: list[stream.Measure],
+) -> list[stream.Stream]:
+    containers = []
+    for measure in measures:
+        voices = list(measure.getElementsByClass(stream.Voice))
+        containers.extend(voices or [measure])
+    return containers
+
+
+def _repair_shared_leading_rests(
+    measures: list[stream.Measure],
+    expected_duration: Fraction,
+) -> bool:
+    records = []
+
+    for container in _measure_containers(measures):
+        events = list(container.notesAndRests)
+        overflow = Fraction(container.highestTime) - expected_duration
+        if overflow not in {Fraction(1, 4), Fraction(1, 2), Fraction(1)} or len(events) < 2:
+            return False
+        first, following = events[:2]
+        if (
+            not first.isRest
+            or Fraction(first.offset) != 0
+            or Fraction(first.duration.quarterLength) != overflow
+            or Fraction(following.offset) != overflow
+        ):
+            return False
+        records.append((container, events, overflow, first))
+
+    for container, events, overflow, first in records:
+        container.remove(first)
+        for event in events[1:]:
+            event.offset = Fraction(event.offset) - overflow
+
+    return True
+
+
+def _repair_leading_grace_padding(
+    measures: list[stream.Measure],
+    expected_duration: Fraction,
+) -> bool:
+    records = []
+
+    for container in _measure_containers(measures):
+        events = list(container.notesAndRests)
+        overflow = Fraction(container.highestTime) - expected_duration
+        if overflow not in {Fraction(1, 2), Fraction(1)} or len(events) < 2:
+            return False
+        first, following = events[:2]
+        if (
+            Fraction(first.offset) != 0
+            or Fraction(first.duration.quarterLength) != overflow
+            or Fraction(following.offset) != overflow
+        ):
+            return False
+        records.append((container, events, overflow, first, following))
+
+    if not (
+        any(first.isRest for _, _, _, first, _ in records)
+        and any(not first.isRest for _, _, _, first, _ in records)
+    ):
+        return False
+
+    for _, _, _, first, following in records:
+        if not first.isRest and (
+            getattr(first, "tie", None) is not None
+            or Fraction(following.duration.quarterLength)
+            <= GRACE_PLAYBACK_DURATION
+        ):
+            return False
+
+    for container, events, overflow, first, following in records:
+        for event in events[1:]:
+            event.offset = Fraction(event.offset) - overflow
+
+        if first.isRest:
+            container.remove(first)
+            continue
+
+        first.duration.quarterLength = GRACE_PLAYBACK_DURATION
+        following.offset = GRACE_PLAYBACK_DURATION
+        following.duration.quarterLength = (
+            Fraction(following.duration.quarterLength)
+            - GRACE_PLAYBACK_DURATION
+        )
+
+    return True
 
 
 def _fit_overfull_container(
@@ -285,6 +377,22 @@ def correct_rhythm(score: stream.Score) -> list[str]:
             current_measures,
             expected_duration,
         )
+        if _repair_shared_leading_rests(
+            current_measures,
+            expected_duration,
+        ):
+            warnings.append(
+                f"{current_measures[0].number}마디: 잘못 추가된 "
+                "앞쪽 공통 쉼표를 제거했습니다."
+            )
+        elif _repair_leading_grace_padding(
+            current_measures,
+            expected_duration,
+        ):
+            warnings.append(
+                f"{current_measures[0].number}마디: 장식음을 일반 음표로 "
+                "인식해 생긴 앞쪽 여분 박자를 제거했습니다."
+            )
 
         for part_number, (part, measures) in enumerate(
             zip(parts, part_measures),

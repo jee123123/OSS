@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import sys
 import re
+import json
 import tempfile
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from score2midi.page_editor import (
     pages_for_file,
     prepare_conversion_inputs,
 )
+from score2midi.measure_review import load_measure_image, reported_measures
 from score2midi.preprocess import preprocess_page
 
 
@@ -114,6 +116,8 @@ class Score2MidiWindow(QMainWindow):
             self.settings.value("audiveris_path", "audiveris")
         )
         self.current_output: Path | None = None
+        self.converted_pages: list[PageSpec] = []
+        self.review_status: dict[str, str] = {}
 
         self.file_list = QListWidget()
         self.file_list.setViewMode(QListView.ViewMode.IconMode)
@@ -226,6 +230,29 @@ class Score2MidiWindow(QMainWindow):
         self.result_summary_label = QLabel()
         self.report_view = QTextEdit()
         self.report_view.setReadOnly(True)
+        self.report_view.setMaximumHeight(150)
+        self.problem_list = QListWidget()
+        self.problem_list.setMinimumWidth(330)
+        self.problem_list.currentItemChanged.connect(
+            self.show_problem_measure
+        )
+        self.problem_preview = QLabel("검토할 마디를 선택하세요.")
+        self.problem_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.problem_preview.setMinimumSize(420, 250)
+        self.problem_preview.setStyleSheet("border: 1px solid #999;")
+        self.review_status_label = QLabel("검토 상태: 미검토")
+        self.normal_button = QPushButton("정상")
+        self.retry_button = QPushButton("다시 인식")
+        self.edit_button = QPushButton("수정 필요")
+        self.normal_button.clicked.connect(
+            lambda: self.set_review_status("정상")
+        )
+        self.retry_button.clicked.connect(
+            lambda: self.set_review_status("다시 인식")
+        )
+        self.edit_button.clicked.connect(
+            lambda: self.set_review_status("수정 필요")
+        )
 
         self.play_button = QPushButton("재생")
         self.pause_button = QPushButton("일시정지")
@@ -282,6 +309,15 @@ class Score2MidiWindow(QMainWindow):
         bpm_layout.addWidget(self.result_bpm_input)
         bpm_layout.addWidget(self.save_bpm_button)
 
+        review_layout = QHBoxLayout()
+        review_layout.addWidget(self.problem_list)
+        review_layout.addWidget(self.problem_preview, 1)
+
+        review_buttons = QHBoxLayout()
+        review_buttons.addWidget(self.review_status_label)
+        for button in self.normal_button, self.retry_button, self.edit_button:
+            review_buttons.addWidget(button)
+
         layout = QVBoxLayout()
         layout.addWidget(QLabel("변환 결과"))
         layout.addWidget(self.result_path_label)
@@ -289,6 +325,9 @@ class Score2MidiWindow(QMainWindow):
         layout.addLayout(playback_layout)
         layout.addLayout(file_layout)
         layout.addLayout(bpm_layout)
+        layout.addWidget(QLabel("문제 마디 검토"))
+        layout.addLayout(review_layout)
+        layout.addLayout(review_buttons)
         layout.addWidget(QLabel("변환 보고서"))
         layout.addWidget(self.report_view)
         layout.addWidget(self.new_conversion_button)
@@ -504,6 +543,7 @@ class Score2MidiWindow(QMainWindow):
             self.audiveris,
             bpm,
         )
+        self.converted_pages = list(page_specs)
         self.worker.succeeded.connect(self.conversion_succeeded)
         self.worker.failed.connect(self.conversion_failed)
         self.worker.finished.connect(lambda: self.set_controls_enabled(True))
@@ -544,11 +584,86 @@ class Score2MidiWindow(QMainWindow):
         self.result_path_label.setText(f"MIDI: {output}")
         self.result_summary_label.setText(_result_summary(details))
         self.report_view.setPlainText(details)
+        self.load_review_issues(details)
         self.result_bpm_input.setValue(self.bpm_input.value())
         self.open_xml_button.setEnabled(output.with_suffix(".musicxml").is_file())
         self.open_report_button.setEnabled(details_path.is_file())
         self.player.stop()
         self.pages.setCurrentWidget(self.result_page)
+
+    def load_review_issues(self, details: str) -> None:
+        self.problem_list.clear()
+        self.problem_preview.setText("검토할 마디를 선택하세요.")
+        self.review_status = {}
+        if self.current_output is None:
+            return
+
+        status_path = self.current_output.with_suffix(".review.json")
+        try:
+            self.review_status = json.loads(status_path.read_text("utf-8"))
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+
+        musicxml = self.current_output.with_suffix(".musicxml")
+        if not musicxml.is_file():
+            return
+        for issue in reported_measures(details, musicxml):
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, issue)
+            item.setToolTip("\n".join(issue.messages))
+            self.problem_list.addItem(item)
+            self.update_review_item(item)
+        if self.problem_list.count():
+            self.problem_list.setCurrentRow(0)
+        else:
+            self.problem_preview.setText("보고된 문제 마디가 없습니다.")
+
+    def update_review_item(self, item: QListWidgetItem) -> None:
+        issue = item.data(Qt.ItemDataRole.UserRole)
+        status = self.review_status.get(str(issue.measure), "미검토")
+        item.setText(f"{issue.measure}마디 · {status}")
+
+    def show_problem_measure(
+        self,
+        current: QListWidgetItem | None,
+        _previous: QListWidgetItem | None = None,
+    ) -> None:
+        if current is None or self.current_output is None:
+            self.review_status_label.setText("검토 상태: 미검토")
+            return
+        issue = current.data(Qt.ItemDataRole.UserRole)
+        status = self.review_status.get(str(issue.measure), "미검토")
+        self.review_status_label.setText(f"검토 상태: {status}")
+        try:
+            image = load_measure_image(
+                self.converted_pages,
+                self.current_output.with_suffix(".musicxml"),
+                issue.measure,
+            )
+        except (OSError, ValueError, IndexError, StopIteration) as error:
+            self.problem_preview.setText(f"마디 미리보기를 만들 수 없습니다.\n{error}")
+            return
+        try:
+            self.set_preview_image(self.problem_preview, image)
+        finally:
+            image.close()
+
+    def set_review_status(self, status: str) -> None:
+        item = self.problem_list.currentItem()
+        if item is None or self.current_output is None:
+            return
+        issue = item.data(Qt.ItemDataRole.UserRole)
+        self.review_status[str(issue.measure)] = status
+        try:
+            self.current_output.with_suffix(".review.json").write_text(
+                json.dumps(self.review_status, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            QMessageBox.warning(self, "검토 상태 저장 실패", str(error))
+            return
+        self.update_review_item(item)
+        self.review_status_label.setText(f"검토 상태: {status}")
 
     def play_result(self) -> None:
         if self.current_output is not None:

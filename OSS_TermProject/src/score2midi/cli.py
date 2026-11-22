@@ -361,7 +361,32 @@ def convert_pages(
                     detected.midiProgram = 0
             else:
                 part.insert(0, instrument.Piano())
-        score.write("musicxml", fp=str(output.with_suffix(".musicxml")))
+        musicxml_output = output.with_suffix(".musicxml")
+        score.write("musicxml", fp=str(musicxml_output))
+        score = converter.parse(str(musicxml_output))
+        serialized_warnings = correct_rhythm(score)
+        repaired_measures = {
+            match.group(1)
+            for warning in serialized_warnings
+            if (
+                match := re.match(
+                    r"(\d+)마디: (?:장식음|잘못 추가된 앞쪽 공통 쉼표)",
+                    warning,
+                )
+            )
+        }
+        conversion_warnings = [
+            warning
+            for warning in conversion_warnings
+            if not any(
+                re.match(rf"{measure}마디 파트 .*초과", warning)
+                for measure in repaired_measures
+            )
+        ]
+        for warning in serialized_warnings:
+            if warning not in conversion_warnings:
+                conversion_warnings.append(warning)
+        score.write("musicxml", fp=str(musicxml_output))
         navigation_plan = None
         try:
             navigation_plan, navigation_detection_warnings = (
