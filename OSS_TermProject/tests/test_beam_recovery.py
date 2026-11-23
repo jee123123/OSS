@@ -20,9 +20,18 @@ from score2midi.beam_recovery import (
     is_safe_measure_replacement,
     select_non_overlapping_beam_groups,
 )
+from score2midi.beam_layout import _measure_anchors
 
 
 class BeamRecoveryTest(unittest.TestCase):
+    def test_measure_anchors_return_fractional_offsets(self) -> None:
+        measure = stream.Measure(number=1)
+        event = note.Note("C4", quarterLength=Fraction(1, 2))
+        event.style.absoluteX = 42
+        measure.insert(Fraction(1, 2), event)
+
+        self.assertEqual(_measure_anchors(measure), [(42.0, Fraction(1, 2))])
+
     def test_measure_regions_accepts_missing_left_margin(self) -> None:
         xml = """\
 <score-partwise version="4.0">

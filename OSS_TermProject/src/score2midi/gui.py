@@ -42,6 +42,11 @@ from score2midi.page_editor import (
     prepare_conversion_inputs,
 )
 from score2midi.measure_review import load_measure_image, reported_measures
+from score2midi.measure_retry import (
+    RetryCandidate,
+    apply_retry_candidate,
+    recognize_measure_candidate,
+)
 from score2midi.preprocess import preprocess_page
 
 
@@ -102,6 +107,37 @@ class ConversionWorker(QThread):
                 self.failed.emit(f"자세한 내용은 {log_path}를 참고하세요.")
         else:
             self.succeeded.emit(str(self.output))
+
+
+class MeasureRetryWorker(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        pages: list[PageSpec],
+        musicxml: Path,
+        measure: int,
+        audiveris: str,
+    ):
+        super().__init__()
+        self.pages = pages
+        self.musicxml = musicxml
+        self.measure = measure
+        self.audiveris = audiveris
+
+    def run(self) -> None:
+        try:
+            candidate = recognize_measure_candidate(
+                self.pages,
+                self.musicxml,
+                self.measure,
+                self.audiveris,
+            )
+        except Exception as error:
+            self.failed.emit(str(error))
+        else:
+            self.succeeded.emit(candidate)
 
 
 class Score2MidiWindow(QMainWindow):
@@ -244,6 +280,7 @@ class Score2MidiWindow(QMainWindow):
         self.normal_button = QPushButton("정상")
         self.retry_button = QPushButton("다시 인식")
         self.edit_button = QPushButton("수정 필요")
+        self.run_retry_button = QPushButton("선택 마디 400DPI 재인식")
         self.normal_button.clicked.connect(
             lambda: self.set_review_status("정상")
         )
@@ -253,6 +290,7 @@ class Score2MidiWindow(QMainWindow):
         self.edit_button.clicked.connect(
             lambda: self.set_review_status("수정 필요")
         )
+        self.run_retry_button.clicked.connect(self.start_measure_retry)
 
         self.play_button = QPushButton("재생")
         self.pause_button = QPushButton("일시정지")
@@ -317,6 +355,7 @@ class Score2MidiWindow(QMainWindow):
         review_buttons.addWidget(self.review_status_label)
         for button in self.normal_button, self.retry_button, self.edit_button:
             review_buttons.addWidget(button)
+        review_buttons.addWidget(self.run_retry_button)
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("변환 결과"))
@@ -665,6 +704,81 @@ class Score2MidiWindow(QMainWindow):
         self.update_review_item(item)
         self.review_status_label.setText(f"검토 상태: {status}")
 
+    def start_measure_retry(self) -> None:
+        item = self.problem_list.currentItem()
+        if item is None or self.current_output is None:
+            return
+        issue = item.data(Qt.ItemDataRole.UserRole)
+        self.set_review_status("다시 인식")
+        self.run_retry_button.setEnabled(False)
+        self.review_status_label.setText(
+            f"검토 상태: {issue.measure}마디 400DPI 재인식 중…"
+        )
+        self.retry_worker = MeasureRetryWorker(
+            list(self.converted_pages),
+            self.current_output.with_suffix(".musicxml"),
+            issue.measure,
+            self.audiveris,
+        )
+        self.retry_worker.succeeded.connect(self.measure_retry_succeeded)
+        self.retry_worker.failed.connect(self.measure_retry_failed)
+        self.retry_worker.finished.connect(
+            lambda: self.run_retry_button.setEnabled(True)
+        )
+        self.retry_worker.start()
+
+    def measure_retry_succeeded(self, retry: RetryCandidate) -> None:
+        if not retry.safe:
+            self.review_status_label.setText("검토 상태: 재인식 결과 적용 불가")
+            QMessageBox.warning(
+                self,
+                f"{retry.measure}마디 재인식 결과",
+                retry.comparison,
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            f"{retry.measure}마디 재인식 결과",
+            f"{retry.comparison}\n\n새 결과를 적용하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes or self.current_output is None:
+            self.review_status_label.setText("검토 상태: 다시 인식")
+            return
+        try:
+            apply_retry_candidate(
+                self.current_output.with_suffix(".musicxml"),
+                self.current_output,
+                retry,
+                self.result_bpm_input.value(),
+            )
+        except Exception as error:
+            QMessageBox.critical(self, "재인식 결과 적용 실패", str(error))
+            return
+
+        self.review_status[str(retry.measure)] = "정상"
+        self.current_output.with_suffix(".review.json").write_text(
+            json.dumps(self.review_status, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        output = self.current_output
+        self.show_result(output)
+        for row in range(self.problem_list.count()):
+            item = self.problem_list.item(row)
+            if item.data(Qt.ItemDataRole.UserRole).measure == retry.measure:
+                self.problem_list.setCurrentRow(row)
+                break
+        QMessageBox.information(
+            self,
+            "재인식 적용 완료",
+            f"{retry.measure}마디를 교체하고 MIDI를 다시 저장했습니다.",
+        )
+
+    def measure_retry_failed(self, error: str) -> None:
+        self.review_status_label.setText("검토 상태: 재인식 실패")
+        QMessageBox.warning(self, "마디 재인식 실패", error)
+
     def play_result(self) -> None:
         if self.current_output is not None:
             source = QUrl.fromLocalFile(str(self.current_output.resolve()))
@@ -732,7 +846,11 @@ class Score2MidiWindow(QMainWindow):
         QMessageBox.critical(self, "변환 실패", error)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt event naming convention
-        if hasattr(self, "worker") and self.worker.isRunning():
+        if (
+            hasattr(self, "worker") and self.worker.isRunning()
+        ) or (
+            hasattr(self, "retry_worker") and self.retry_worker.isRunning()
+        ):
             QMessageBox.information(
                 self,
                 "변환 중",

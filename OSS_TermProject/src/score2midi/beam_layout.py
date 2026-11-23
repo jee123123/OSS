@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from xml.etree import ElementTree
 from zipfile import ZipFile, is_zipfile

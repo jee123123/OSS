@@ -2,12 +2,27 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from music21 import converter, note, stream, tempo
+from music21 import converter, instrument, note, stream, tempo
 
-from score2midi.cli import _set_tempo, rewrite_midi_tempo
+from score2midi.cli import _force_piano, _set_tempo, rewrite_midi_tempo
 
 
 class TempoTest(unittest.TestCase):
+    def test_replaces_recognized_instrument_with_piano(self) -> None:
+        score = stream.Score()
+        part = stream.Part()
+        part.insert(0, instrument.Vocalist())
+        score.insert(0, part)
+
+        _force_piano(score)
+
+        detected = list(
+            score.recurse().getElementsByClass(instrument.Instrument)
+        )
+        self.assertEqual(len(detected), 1)
+        self.assertIsInstance(detected[0], instrument.Piano)
+        self.assertEqual(detected[0].midiProgram, 0)
+
     def test_replaces_existing_tempo_with_selected_bpm(self) -> None:
         score = stream.Score()
         part = stream.Part()
@@ -29,6 +44,7 @@ class TempoTest(unittest.TestCase):
     def test_rewrites_midi_with_selected_bpm(self) -> None:
         score = stream.Score()
         part = stream.Part()
+        part.insert(0, instrument.Vocalist())
         part.append(note.Note("C4", quarterLength=1))
         score.insert(0, part)
 
@@ -43,9 +59,16 @@ class TempoTest(unittest.TestCase):
             marks = list(
                 converted.recurse().getElementsByClass(tempo.MetronomeMark)
             )
+            programs = [
+                detected.midiProgram
+                for detected in converted.recurse().getElementsByClass(
+                    instrument.Instrument
+                )
+            ]
 
         self.assertTrue(marks)
         self.assertAlmostEqual(marks[0].number, 88, delta=0.1)
+        self.assertEqual(programs, [0])
 
 
 if __name__ == "__main__":

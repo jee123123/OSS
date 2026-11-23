@@ -57,11 +57,22 @@ def _set_tempo(score, bpm: int) -> None:
     score.insert(0, tempo.MetronomeMark(number=bpm))
 
 
+def _force_piano(score) -> None:
+    for part in score.parts:
+        for detected in list(
+            part.recurse().getElementsByClass(instrument.Instrument)
+        ):
+            if detected.activeSite is not None:
+                detected.activeSite.remove(detected)
+        part.insert(0, instrument.Piano())
+
+
 def rewrite_midi_tempo(source: Path, output: Path, bpm: int) -> None:
     if not source.is_file():
         raise FileNotFoundError(source)
     score = converter.parse(str(source))
     _set_tempo(score, bpm)
+    _force_piano(score)
     output.parent.mkdir(parents=True, exist_ok=True)
     score.write("midi", fp=str(output))
 
@@ -352,15 +363,7 @@ def convert_pages(
         conversion_warnings.extend(stabilize_note_timing(score))
         conversion_warnings.extend(separate_repeated_notes(score))
         _set_tempo(score, bpm)
-        for part in score.parts:
-            detected_instruments = list(
-                part.recurse().getElementsByClass(instrument.Instrument)
-            )
-            if detected_instruments:
-                for detected in detected_instruments:
-                    detected.midiProgram = 0
-            else:
-                part.insert(0, instrument.Piano())
+        _force_piano(score)
         musicxml_output = output.with_suffix(".musicxml")
         score.write("musicxml", fp=str(musicxml_output))
         score = converter.parse(str(musicxml_output))
@@ -386,6 +389,7 @@ def convert_pages(
         for warning in serialized_warnings:
             if warning not in conversion_warnings:
                 conversion_warnings.append(warning)
+        _force_piano(score)
         score.write("musicxml", fp=str(musicxml_output))
         navigation_plan = None
         try:
@@ -411,6 +415,7 @@ def convert_pages(
             navigation_plan,
         )
         conversion_warnings.extend(navigation_warnings)
+        _force_piano(playback_score)
         playback_score.write("midi", fp=str(output))
 
         details = conversion_warnings + review_warnings
