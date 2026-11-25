@@ -58,6 +58,8 @@ def _bands(values: np.ndarray, threshold: int) -> list[tuple[int, int]]:
 
 def detect_staff_lines(
     image: Image.Image | np.ndarray,
+    *,
+    minimum_line_ratio: float = 0.05,
 ) -> list[tuple[int, int, int, int, int]]:
     ink = _ink_mask(_gray_array(image))
     height, width = ink.shape
@@ -66,7 +68,7 @@ def detect_staff_lines(
         cv2.MORPH_OPEN,
         cv2.getStructuringElement(
             cv2.MORPH_RECT,
-            (max(15, width // 20), 1),
+            (max(15, int(width * minimum_line_ratio)), 1),
         ),
     )
     projection = np.count_nonzero(horizontal, axis=1)

@@ -57,12 +57,13 @@ class RetryCandidate:
 
 def _part_measure(
     part: stream.Part,
-    measure_number: int,
+    measure_number: int | None,
     local_number: int,
 ) -> stream.Measure:
-    direct = part.measure(measure_number)
-    if direct is not None:
-        return direct
+    if measure_number is not None:
+        direct = part.measure(measure_number)
+        if direct is not None:
+            return direct
     measures = list(part.getElementsByClass(stream.Measure))
     if not 1 <= local_number <= len(measures):
         raise ValueError("재인식 결과에서 대상 마디를 찾을 수 없습니다.")
@@ -71,7 +72,7 @@ def _part_measure(
 
 def measure_stats(
     score: stream.Score,
-    measure_number: int,
+    measure_number: int | None,
     local_number: int,
     expected_durations: tuple[Fraction, ...] | None = None,
 ) -> MeasureStats:
@@ -134,7 +135,7 @@ def recognize_measure_candidate(
             )
             candidate_measure = _part_measure(
                 candidate_part,
-                measure_number,
+                None,
                 region.local_number,
             )
             signature = current_measure.getContextByClass(meter.TimeSignature)
@@ -166,7 +167,7 @@ def recognize_measure_candidate(
         measure_stats(current_score, measure_number, region.local_number),
         measure_stats(
             candidate_score,
-            measure_number,
+            None,
             region.local_number,
             expected_durations,
         ),
@@ -188,7 +189,7 @@ def apply_retry_candidate(
         current = _part_measure(part, retry.measure, retry.local_number)
         candidate_measure = _part_measure(
             candidate_part,
-            retry.measure,
+            None,
             retry.local_number,
         )
         if Fraction(candidate_measure.highestTime) != Fraction(

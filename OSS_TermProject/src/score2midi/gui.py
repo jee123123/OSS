@@ -10,12 +10,15 @@ import tempfile
 from pathlib import Path
 
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QSettings, QSize, QThread, Qt, QUrl, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QSettings, QSize, QThread, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -35,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from score2midi.cli import convert_pages, rewrite_midi_tempo
+from score2midi.measure_preview import render_measure_preview
 from score2midi.page_editor import (
     PageSpec,
     load_page_image,
@@ -154,6 +158,7 @@ class Score2MidiWindow(QMainWindow):
         self.current_output: Path | None = None
         self.converted_pages: list[PageSpec] = []
         self.review_status: dict[str, str] = {}
+        self.preview_audio: QBuffer | None = None
 
         self.file_list = QListWidget()
         self.file_list.setViewMode(QListView.ViewMode.IconMode)
@@ -291,6 +296,10 @@ class Score2MidiWindow(QMainWindow):
             lambda: self.set_review_status("수정 필요")
         )
         self.run_retry_button.clicked.connect(self.start_measure_retry)
+        self.listen_measure_button = QPushButton("선택 마디 듣기")
+        self.listen_measure_button.setEnabled(False)
+        self.listen_measure_button.clicked.connect(self.play_selected_measure)
+        self.include_neighbors = QCheckBox("앞뒤 한 마디 포함")
 
         self.play_button = QPushButton("재생")
         self.pause_button = QPushButton("일시정지")
@@ -357,6 +366,11 @@ class Score2MidiWindow(QMainWindow):
             review_buttons.addWidget(button)
         review_buttons.addWidget(self.run_retry_button)
 
+        preview_controls = QHBoxLayout()
+        preview_controls.addWidget(self.listen_measure_button)
+        preview_controls.addWidget(self.include_neighbors)
+        preview_controls.addStretch()
+
         layout = QVBoxLayout()
         layout.addWidget(QLabel("변환 결과"))
         layout.addWidget(self.result_path_label)
@@ -366,6 +380,7 @@ class Score2MidiWindow(QMainWindow):
         layout.addLayout(bpm_layout)
         layout.addWidget(QLabel("문제 마디 검토"))
         layout.addLayout(review_layout)
+        layout.addLayout(preview_controls)
         layout.addLayout(review_buttons)
         layout.addWidget(QLabel("변환 보고서"))
         layout.addWidget(self.report_view)
@@ -611,6 +626,7 @@ class Score2MidiWindow(QMainWindow):
         self.show_result(Path(output))
 
     def show_result(self, output: Path) -> None:
+        self.stop_measure_preview()
         self.current_output = output
         details_path = output.with_suffix(".txt")
         try:
@@ -667,6 +683,10 @@ class Score2MidiWindow(QMainWindow):
         current: QListWidgetItem | None,
         _previous: QListWidgetItem | None = None,
     ) -> None:
+        self.stop_measure_preview()
+        self.listen_measure_button.setEnabled(
+            current is not None and self.current_output is not None
+        )
         if current is None or self.current_output is None:
             self.review_status_label.setText("검토 상태: 미검토")
             return
@@ -686,6 +706,49 @@ class Score2MidiWindow(QMainWindow):
             self.set_preview_image(self.problem_preview, image)
         finally:
             image.close()
+
+    def play_selected_measure(self) -> None:
+        item = self.problem_list.currentItem()
+        if item is not None:
+            issue = item.data(Qt.ItemDataRole.UserRole)
+            self.play_measure_preview(issue.measure)
+
+    def play_measure_preview(
+        self,
+        measure: int,
+        retry: RetryCandidate | None = None,
+    ) -> None:
+        if self.current_output is None:
+            return
+        self.player.stop()
+        self.stop_measure_preview()
+        try:
+            wav = render_measure_preview(
+                self.current_output.with_suffix(".musicxml"),
+                measure,
+                self.result_bpm_input.value(),
+                include_neighbors=self.include_neighbors.isChecked(),
+                retry=retry,
+            )
+        except Exception as error:
+            QMessageBox.warning(
+                QApplication.activeModalWidget() or self,
+                "미리듣기 실패",
+                f"재생할 음원을 만들 수 없습니다.\n{error}",
+            )
+            return
+        audio = QBuffer(self)
+        audio.setData(wav)
+        audio.open(QIODevice.OpenModeFlag.ReadOnly)
+        self.preview_audio = audio
+        self.player.setSourceDevice(audio, QUrl("preview.wav"))
+        self.player.play()
+
+    def stop_measure_preview(self) -> None:
+        if self.preview_audio is not None:
+            self.player.setSource(QUrl())
+            self.preview_audio.deleteLater()
+            self.preview_audio = None
 
     def set_review_status(self, status: str) -> None:
         item = self.problem_list.currentItem()
@@ -711,6 +774,7 @@ class Score2MidiWindow(QMainWindow):
         issue = item.data(Qt.ItemDataRole.UserRole)
         self.set_review_status("다시 인식")
         self.run_retry_button.setEnabled(False)
+        self.new_conversion_button.setEnabled(False)
         self.review_status_label.setText(
             f"검토 상태: {issue.measure}마디 400DPI 재인식 중…"
         )
@@ -725,26 +789,48 @@ class Score2MidiWindow(QMainWindow):
         self.retry_worker.finished.connect(
             lambda: self.run_retry_button.setEnabled(True)
         )
+        self.retry_worker.finished.connect(
+            lambda: self.new_conversion_button.setEnabled(True)
+        )
         self.retry_worker.start()
 
+    def confirm_retry_candidate(self, retry: RetryCandidate) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{retry.measure}마디 재인식 결과")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(retry.comparison))
+        controls = QHBoxLayout()
+        for label, action in (
+            ("기존 결과 듣기", lambda: self.play_measure_preview(retry.measure)),
+            ("재인식 결과 듣기", lambda: self.play_measure_preview(retry.measure, retry)),
+            ("정지", self.player.stop),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(action)
+            controls.addWidget(button)
+        layout.addLayout(controls)
+
+        choices = QDialogButtonBox()
+        keep = choices.addButton("기존 유지", QDialogButtonBox.ButtonRole.RejectRole)
+        keep.setDefault(True)
+        choices.rejected.connect(dialog.reject)
+        if retry.safe:
+            choices.addButton("새 결과 적용", QDialogButtonBox.ButtonRole.AcceptRole)
+            choices.accepted.connect(dialog.accept)
+        layout.addWidget(choices)
+        self.player.stop()
+        try:
+            return dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            self.stop_measure_preview()
+            dialog.deleteLater()
+
     def measure_retry_succeeded(self, retry: RetryCandidate) -> None:
-        if not retry.safe:
-            self.review_status_label.setText("검토 상태: 재인식 결과 적용 불가")
-            QMessageBox.warning(
-                self,
-                f"{retry.measure}마디 재인식 결과",
-                retry.comparison,
-            )
+        if self.current_output is None:
             return
-        answer = QMessageBox.question(
-            self,
-            f"{retry.measure}마디 재인식 결과",
-            f"{retry.comparison}\n\n새 결과를 적용하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if answer != QMessageBox.StandardButton.Yes or self.current_output is None:
-            self.review_status_label.setText("검토 상태: 다시 인식")
+        if not self.confirm_retry_candidate(retry):
+            status = "다시 인식" if retry.safe else "재인식 결과 적용 불가"
+            self.review_status_label.setText(f"검토 상태: {status}")
             return
         try:
             apply_retry_candidate(
@@ -781,16 +867,25 @@ class Score2MidiWindow(QMainWindow):
 
     def play_result(self) -> None:
         if self.current_output is not None:
+            self.stop_measure_preview()
             source = QUrl.fromLocalFile(str(self.current_output.resolve()))
             if self.player.source() != source:
                 self.player.setSource(source)
             self.player.play()
 
     def start_new_conversion(self) -> None:
+        self.stop_measure_preview()
         self.player.stop()
         self.pages.setCurrentWidget(self.input_page)
 
     def playback_failed(self, _error, message: str) -> None:
+        if self.preview_audio is not None:
+            QMessageBox.warning(
+                QApplication.activeModalWidget() or self,
+                "미리듣기 실패",
+                f"미리듣기를 재생할 수 없습니다.\n{message}",
+            )
+            return
         QMessageBox.warning(
             self,
             "내장 재생 불가",
@@ -859,6 +954,7 @@ class Score2MidiWindow(QMainWindow):
             event.ignore()
             return
         self.player.stop()
+        self.stop_measure_preview()
         event.accept()
 
 

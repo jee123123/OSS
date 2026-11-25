@@ -9,12 +9,19 @@ import re
 import numpy as np
 from PIL import Image
 
-from score2midi.beam_image import deduplicate_staff_lines, detect_staff_lines
+from score2midi.beam_image import (
+    _bands,
+    _gray_array,
+    _ink_mask,
+    deduplicate_staff_lines,
+    detect_staff_lines,
+)
 from score2midi.beam_layout import (
     _measure_regions,
     _musicxml_root,
     _staff_bounds,
 )
+from score2midi.navigation_vision import _staff_runs, _system_rows
 from score2midi.page_editor import PageSpec, load_page_image
 
 
@@ -58,21 +65,23 @@ def load_measure_image(
     measure_number: int,
     dpi: int = 160,
 ) -> Image.Image:
-    page_width, regions = _measure_regions(musicxml)
+    _, regions = _measure_regions(musicxml)
     region = next(
         item for item in regions.values() if item.global_number == measure_number
     )
     if not 1 <= region.page <= len(pages):
         raise ValueError("원본 악보 페이지를 찾을 수 없습니다.")
 
-    image = load_page_image(pages[region.page - 1], dpi=dpi)
+    rows = _system_rows(musicxml)
+    target_row = rows[(region.page, region.system)]
     page_regions = [
         item for item in regions.values() if item.page == region.page
     ]
-    system_regions = [
-        item for item in page_regions if item.system == region.system
+    page_rows = sorted({rows[(item.page, item.system)] for item in page_regions})
+    row_index = page_rows.index(target_row)
+    row_regions = [
+        item for item in page_regions if rows[(item.page, item.system)] == target_row
     ]
-    system_count = 1 + max(item.system for item in page_regions)
     root = _musicxml_root(musicxml)
     staff_count = sum(
         max(
@@ -86,39 +95,58 @@ def load_measure_image(
         for part in root.findall("part")
     )
 
-    try:
-        staves = deduplicate_staff_lines(
-            detect_staff_lines(image),
-            system_count * staff_count,
-        )
-        first_staff = staves[region.system * staff_count]
-        last_staff = staves[(region.system + 1) * staff_count - 1]
+    expected_count = len(page_rows) * staff_count
+    with load_page_image(pages[region.page - 1], dpi=dpi) as image:
+        # A long horizontal run excludes beams that otherwise merge into staff lines.
+        for minimum_line_ratio in (0.125, 0.05):
+            staves = deduplicate_staff_lines(
+                detect_staff_lines(image, minimum_line_ratio=minimum_line_ratio),
+                expected_count,
+            )
+            if len(staves) == expected_count and all(
+                upper[-1] < lower[0] for upper, lower in zip(staves, staves[1:])
+            ):
+                break
+        else:
+            raise ValueError("원본 페이지에서 악보 줄의 위치를 확인하지 못했습니다.")
+
+        first_staff = staves[row_index * staff_count]
+        last_staff = staves[(row_index + 1) * staff_count - 1]
         spacing = float(np.median(np.diff(first_staff)))
         staff_left, staff_right = _staff_bounds(image, first_staff)
-        system_start = min(item.x for item in system_regions)
-        system_width = sum(item.width for item in system_regions)
-        scale = (staff_right - staff_left) / system_width
-        left = staff_left + (region.x - system_start) * scale
+        if len({item.system for item in row_regions}) > 1:
+            runs = _staff_runs(image, first_staff)
+            if runs:
+                staff_left, staff_right = runs[0][0], runs[-1][1]
+        row_left = min(item.x for item in row_regions)
+        row_width = max(item.x + item.width for item in row_regions) - row_left
+        if row_width <= 0 or region.width <= 0:
+            raise ValueError("마디의 가로 위치 정보가 없습니다.")
+        scale = (staff_right - staff_left) / row_width
+        left = staff_left + (region.x - row_left) * scale
         right = left + region.width * scale
+        # Where available, align the estimated bounds to the printed barlines.
+        with image.crop(
+            (0, first_staff[0], image.width, last_staff[-1] + 1)
+        ) as staff_area:
+            columns = np.count_nonzero(_ink_mask(_gray_array(staff_area)), axis=0)
+            minimum_height = round(staff_area.height * 0.85)
+        barlines = [
+            (start + end) / 2
+            for start, end in _bands(columns, minimum_height)
+        ]
+        near_left = min(barlines, key=lambda x: abs(x - left), default=left)
+        near_right = min(barlines, key=lambda x: abs(x - right), default=right)
+        if (
+            near_right > near_left
+            and abs(near_left - left) <= spacing * 3
+            and abs(near_right - right) <= spacing * 3
+        ):
+            left, right = near_left, near_right
         box = (
-            max(0, round(left - spacing * 2)),
+            max(0, round(left - spacing * 0.8)),
             max(0, round(min(first_staff) - spacing * 4)),
-            min(image.width, round(right + spacing * 2)),
+            min(image.width, round(right + spacing * 0.8)),
             min(image.height, round(max(last_staff) + spacing * 4)),
         )
-    except (IndexError, ValueError):
-        top = round(image.height * region.system / system_count)
-        bottom = round(image.height * (region.system + 1) / system_count)
-        left = round(image.width * region.x / page_width)
-        right = round(image.width * (region.x + region.width) / page_width)
-        box = (
-            max(0, left - 20),
-            max(0, top - 20),
-            min(image.width, right + 20),
-            min(image.height, bottom + 20),
-        )
-
-    try:
         return image.crop(box)
-    finally:
-        image.close()
