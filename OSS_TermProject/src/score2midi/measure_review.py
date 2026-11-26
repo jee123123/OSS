@@ -31,6 +31,24 @@ class ReviewIssue:
     messages: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MeasureImageLayout:
+    left: float
+    scale: float
+    staves: tuple[tuple[int, ...], ...]
+
+    def note_position(
+        self, staff_index: int, measure_x: float, steps_from_bottom: int,
+        *, staff_y: float | None = None,
+    ) -> tuple[float, float]:
+        staff = self.staves[staff_index]
+        spacing = (staff[-1] - staff[0]) / 4
+        x = self.left + measure_x * self.scale + spacing / 2
+        if staff_y is not None:
+            return x, staff[0] - staff_y * spacing / 10
+        return x, staff[-1] - steps_from_bottom * spacing / 2
+
+
 def reported_measures(details: str, musicxml: Path) -> list[ReviewIssue]:
     try:
         _, regions = _measure_regions(musicxml)
@@ -65,6 +83,16 @@ def load_measure_image(
     measure_number: int,
     dpi: int = 160,
 ) -> Image.Image:
+    image, _ = load_measure_image_layout(pages, musicxml, measure_number, dpi)
+    return image
+
+
+def load_measure_image_layout(
+    pages: list[PageSpec],
+    musicxml: Path,
+    measure_number: int,
+    dpi: int = 160,
+) -> tuple[Image.Image, MeasureImageLayout]:
     _, regions = _measure_regions(musicxml)
     region = next(
         item for item in regions.values() if item.global_number == measure_number
@@ -110,8 +138,8 @@ def load_measure_image(
         else:
             raise ValueError("원본 페이지에서 악보 줄의 위치를 확인하지 못했습니다.")
 
-        first_staff = staves[row_index * staff_count]
-        last_staff = staves[(row_index + 1) * staff_count - 1]
+        row_staves = staves[row_index * staff_count:(row_index + 1) * staff_count]
+        first_staff, last_staff = row_staves[0], row_staves[-1]
         spacing = float(np.median(np.diff(first_staff)))
         staff_left, staff_right = _staff_bounds(image, first_staff)
         if len({item.system for item in row_regions}) > 1:
@@ -149,4 +177,8 @@ def load_measure_image(
             min(image.width, round(right + spacing * 0.8)),
             min(image.height, round(max(last_staff) + spacing * 4)),
         )
-        return image.crop(box)
+        return image.crop(box), MeasureImageLayout(
+            left - box[0],
+            (right - left) / region.width,
+            tuple(tuple(y - box[1] for y in staff) for staff in row_staves),
+        )

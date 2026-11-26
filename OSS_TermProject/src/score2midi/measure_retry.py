@@ -13,7 +13,7 @@ from music21 import converter, meter, stream
 
 from score2midi.beam_layout import _measure_regions
 from score2midi.cli import _force_piano, _run_audiveris, _set_tempo
-from score2midi.navigation import prepare_playback_score
+from score2midi.navigation import NavigationPlan, prepare_playback_score
 from score2midi.page_editor import PageSpec, load_page_image
 from score2midi.preprocess import preprocess_page
 from score2midi.rhythm_corrector import correct_rhythm
@@ -179,7 +179,8 @@ def apply_retry_candidate(
     midi_output: Path,
     retry: RetryCandidate,
     bpm: int,
-) -> None:
+    navigation_plan: NavigationPlan | None = None,
+) -> stream.Score:
     score = converter.parse(str(current_musicxml))
     candidate_score = converter.parse(str(retry.musicxml))
     if len(score.parts) != len(candidate_score.parts):
@@ -219,7 +220,7 @@ def apply_retry_candidate(
         shutil.copy2(midi_output, midi_backup)
 
     score.write("musicxml", fp=str(current_musicxml))
-    playback, _ = prepare_playback_score(score)
+    playback, _ = prepare_playback_score(score, navigation_plan)
     _force_piano(playback)
     playback.write("midi", fp=str(midi_output))
 
@@ -234,3 +235,4 @@ def apply_retry_candidate(
             f"{details.rstrip()}\n{line}".lstrip(),
             encoding="utf-8",
         )
+    return score

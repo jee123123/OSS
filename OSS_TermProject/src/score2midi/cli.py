@@ -8,12 +8,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from music21 import converter, instrument, tempo
+from music21 import converter, instrument, stream, tempo
 from PIL import Image, ImageChops
 
 from score2midi.articulation import separate_repeated_notes
 from score2midi.beam_recovery import recover_unplaced_beamed_notes
-from score2midi.navigation import prepare_playback_score
+from score2midi.navigation import NavigationPlan, prepare_playback_score
 from score2midi.navigation_vision import detect_navigation_plan
 from score2midi.preprocess import (
     preprocess_page,
@@ -160,7 +160,7 @@ def convert_pages(
     audiveris: str,
     bpm: int = 120,
     note_model: Path | None = DEFAULT_NOTE_MODEL,
-) -> None:
+) -> tuple[stream.Score, NavigationPlan | None]:
     """Convert ordered score pages into one MIDI file."""
     if not images:
         raise ValueError("변환할 악보가 없습니다.")
@@ -424,6 +424,7 @@ def convert_pages(
                 "\n".join(details),
                 encoding="utf-8",
             )
+    return score, navigation_plan
 
 
 def main() -> int:

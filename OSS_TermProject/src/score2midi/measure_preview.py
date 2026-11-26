@@ -1,4 +1,4 @@
-"""Render a short, piano-style WAV for the measure review screen."""
+"""Render a short piano WAV for the measure review screen."""
 
 from __future__ import annotations
 
@@ -11,13 +11,27 @@ import numpy as np
 from music21 import chord, converter, harmony, note, stream
 
 from score2midi.measure_retry import RetryCandidate, _part_measure
+from score2midi.piano_samples import load_piano_samples
 
 SAMPLE_RATE = 22050
 RELEASE_SECONDS = 0.06
 
 
+def _synthetic_tone(pitch: float, t: np.ndarray) -> np.ndarray:
+    """Keep preview playback available when the system sound bank is absent."""
+    frequency = 440 * 2 ** ((pitch - 69) / 12)
+    tone = np.zeros(t.size)
+    for harmonic, gain, decay in (
+        (1, 0.66, 1.8), (2, 0.24, 3), (3, 0.13, 5), (5, 0.05, 9)
+    ):
+        partial = frequency * harmonic * (1 + 0.0003 * (harmonic - 1) ** 2)
+        if partial < SAMPLE_RATE / 2:
+            tone += gain * np.sin(2 * np.pi * partial * t) * np.exp(-decay * t)
+    return tone
+
+
 def render_measure_preview(
-    musicxml: Path,
+    musicxml: Path | stream.Score,
     measure_number: int,
     bpm: int,
     *,
@@ -27,7 +41,7 @@ def render_measure_preview(
     if not 20 <= bpm <= 300:
         raise ValueError("BPM은 20에서 300 사이여야 합니다.")
 
-    score = converter.parse(str(musicxml))
+    score = musicxml if isinstance(musicxml, stream.Score) else converter.parse(str(musicxml))
     parts = list(score.parts)
     if not parts:
         raise ValueError("미리듣기에 사용할 악보 파트가 없습니다.")
@@ -78,7 +92,7 @@ def render_measure_preview(
         for event in excerpt.notes:
             pitches = (event.pitch,) if isinstance(event, note.Note) else event.pitches
             events.extend(
-                (float(event.offset), float(event.quarterLength), pitch.frequency)
+                (float(event.offset), float(event.quarterLength), pitch.ps)
                 for pitch in pitches
             )
 
@@ -91,21 +105,21 @@ def render_measure_preview(
 
     samples = np.zeros(round(duration * SAMPLE_RATE), dtype=np.float32)
     release = round(RELEASE_SECONDS * SAMPLE_RATE)
-    for start, length, frequency in events:
+    piano = load_piano_samples() if events else {}
+    for start, length, pitch in events:
         offset = round(start * seconds_per_beat * SAMPLE_RATE)
         held = max(1, round(length * seconds_per_beat * SAMPLE_RATE))
         size = min(held + release, len(samples) - offset)
         if offset < 0 or size <= 0:
             continue
         t = np.arange(size) / SAMPLE_RATE
-        tone = np.zeros(size)
-        # ponytail: synthesized piano timbre for timing review without a sampled instrument.
-        for harmonic, gain, decay in (
-            (1, 0.66, 1.8), (2, 0.24, 3), (3, 0.13, 5), (5, 0.05, 9)
-        ):
-            partial = frequency * harmonic * (1 + 0.0003 * (harmonic - 1) ** 2)
-            if partial < SAMPLE_RATE / 2:
-                tone += gain * np.sin(2 * np.pi * partial * t) * np.exp(-decay * t)
+        sample = piano.get(round(pitch))
+        if sample is None:
+            tone = _synthetic_tone(pitch, t)
+        else:
+            tone = sample.render(pitch, SAMPLE_RATE, size)
+            # Apply a decay to the sustained sample loop.
+            tone *= np.exp(-0.8 * t)
         tone *= np.minimum(t / 0.004, 1)
         if size > held:
             tone[held:] *= 1 - np.arange(size - held) / release

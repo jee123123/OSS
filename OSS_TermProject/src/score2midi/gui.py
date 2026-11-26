@@ -7,11 +7,14 @@ import sys
 import re
 import json
 import tempfile
+from copy import deepcopy
+from fractions import Fraction
 from pathlib import Path
 
+from music21 import converter, stream
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import QBuffer, QIODevice, QSettings, QSize, QThread, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import QBuffer, QIODevice, QPointF, QSettings, QSize, QThread, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -20,6 +23,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -32,12 +36,15 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from score2midi.cli import convert_pages, rewrite_midi_tempo
+from score2midi.measure_edit import measure_pitches, rhythm_gaps, save_pitch_edit
 from score2midi.measure_preview import render_measure_preview
 from score2midi.page_editor import (
     PageSpec,
@@ -45,12 +52,13 @@ from score2midi.page_editor import (
     pages_for_file,
     prepare_conversion_inputs,
 )
-from score2midi.measure_review import load_measure_image, reported_measures
+from score2midi.measure_review import load_measure_image, load_measure_image_layout, reported_measures
 from score2midi.measure_retry import (
     RetryCandidate,
     apply_retry_candidate,
     recognize_measure_candidate,
 )
+from score2midi.navigation import NavigationPlan
 from score2midi.preprocess import preprocess_page
 
 
@@ -75,7 +83,7 @@ def _result_summary(details: str) -> str:
 class ConversionWorker(QThread):
     """Convert ordered score pages without blocking the window."""
 
-    succeeded = Signal(str)
+    succeeded = Signal(str, object, object)
     failed = Signal(str)
 
     def __init__(
@@ -95,7 +103,7 @@ class ConversionWorker(QThread):
         try:
             with tempfile.TemporaryDirectory(prefix="score2midi-pages-") as directory:
                 inputs = prepare_conversion_inputs(self.pages, Path(directory))
-                convert_pages(
+                score, navigation_plan = convert_pages(
                     inputs,
                     self.output,
                     self.audiveris,
@@ -110,7 +118,7 @@ class ConversionWorker(QThread):
             else:
                 self.failed.emit(f"자세한 내용은 {log_path}를 참고하세요.")
         else:
-            self.succeeded.emit(str(self.output))
+            self.succeeded.emit(str(self.output), score, navigation_plan)
 
 
 class MeasureRetryWorker(QThread):
@@ -156,6 +164,8 @@ class Score2MidiWindow(QMainWindow):
             self.settings.value("audiveris_path", "audiveris")
         )
         self.current_output: Path | None = None
+        self.result_score: stream.Score | None = None
+        self.result_navigation_plan: NavigationPlan | None = None
         self.converted_pages: list[PageSpec] = []
         self.review_status: dict[str, str] = {}
         self.preview_audio: QBuffer | None = None
@@ -299,6 +309,9 @@ class Score2MidiWindow(QMainWindow):
         self.listen_measure_button = QPushButton("선택 마디 듣기")
         self.listen_measure_button.setEnabled(False)
         self.listen_measure_button.clicked.connect(self.play_selected_measure)
+        self.pitch_edit_button = QPushButton("음표·박자 수정")
+        self.pitch_edit_button.setEnabled(False)
+        self.pitch_edit_button.clicked.connect(self.edit_selected_measure)
         self.include_neighbors = QCheckBox("앞뒤 한 마디 포함")
 
         self.play_button = QPushButton("재생")
@@ -368,6 +381,7 @@ class Score2MidiWindow(QMainWindow):
 
         preview_controls = QHBoxLayout()
         preview_controls.addWidget(self.listen_measure_button)
+        preview_controls.addWidget(self.pitch_edit_button)
         preview_controls.addWidget(self.include_neighbors)
         preview_controls.addStretch()
 
@@ -619,7 +633,11 @@ class Score2MidiWindow(QMainWindow):
         ):
             widget.setEnabled(enabled)
 
-    def conversion_succeeded(self, output: str) -> None:
+    def conversion_succeeded(
+        self, output: str, score: stream.Score, navigation_plan: NavigationPlan | None
+    ) -> None:
+        self.result_score = score
+        self.result_navigation_plan = navigation_plan
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.status_label.setText(f"완료: {output}")
@@ -687,6 +705,9 @@ class Score2MidiWindow(QMainWindow):
         self.listen_measure_button.setEnabled(
             current is not None and self.current_output is not None
         )
+        self.pitch_edit_button.setEnabled(
+            self.listen_measure_button.isEnabled() and self.run_retry_button.isEnabled()
+        )
         if current is None or self.current_output is None:
             self.review_status_label.setText("검토 상태: 미검토")
             return
@@ -717,6 +738,8 @@ class Score2MidiWindow(QMainWindow):
         self,
         measure: int,
         retry: RetryCandidate | None = None,
+        *,
+        score: stream.Score | None = None,
     ) -> None:
         if self.current_output is None:
             return
@@ -724,7 +747,7 @@ class Score2MidiWindow(QMainWindow):
         self.stop_measure_preview()
         try:
             wav = render_measure_preview(
-                self.current_output.with_suffix(".musicxml"),
+                score if score is not None else self.current_output.with_suffix(".musicxml"),
                 measure,
                 self.result_bpm_input.value(),
                 include_neighbors=self.include_neighbors.isChecked(),
@@ -750,6 +773,241 @@ class Score2MidiWindow(QMainWindow):
             self.preview_audio.deleteLater()
             self.preview_audio = None
 
+    def edit_selected_measure(self) -> None:
+        selected = self.problem_list.currentItem()
+        if selected is None or self.current_output is None:
+            return
+        measure = selected.data(Qt.ItemDataRole.UserRole).measure
+        try:
+            source = self.result_score
+            if source is None:
+                source = converter.parse(str(self.current_output.with_suffix(".musicxml")))
+            draft = deepcopy(source)
+            entries = measure_pitches(draft, measure)
+        except Exception as error:
+            QMessageBox.warning(self, "마디 편집 실패", str(error))
+            return
+        if not entries:
+            QMessageBox.information(self, "음높이 수정", "이 마디에는 편집할 음표가 없습니다.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{measure}마디 음표·박자 수정")
+        dialog.resize(920, 490)
+        layout = QVBoxLayout(dialog)
+        content = QHBoxLayout()
+        picture = QLabel("원본 마디 미리보기를 사용할 수 없습니다.")
+        picture.setWordWrap(True)
+        picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_column = QVBoxLayout()
+        image_column.addWidget(picture, 1)
+        marker_status = QLabel()
+        marker_status.setWordWrap(True)
+        image_column.addWidget(marker_status)
+        content.addLayout(image_column, 1)
+
+        positions = [None] * len(entries)
+        pixmap = self.problem_preview.pixmap()
+        try:
+            image, image_layout = load_measure_image_layout(
+                self.converted_pages, self.current_output.with_suffix(".musicxml"), measure,
+            )
+            with image:
+                self.set_preview_image(picture, image)
+                pixmap = picture.pixmap()
+                scale_x, scale_y = pixmap.width() / image.width, pixmap.height() / image.height
+                for index, entry in enumerate(entries):
+                    position = entry.original_image_position(image_layout)
+                    if position is None:
+                        continue
+                    x, y = position
+                    if 0 <= x < image.width and 0 <= y < image.height:
+                        positions[index] = QPointF(x * scale_x, y * scale_y)
+        except (OSError, ValueError, IndexError, StopIteration):
+            pass
+
+        table = QTableWidget(len(entries), 4)
+        table.setHorizontalHeaderLabels(["파트", "시작 위치 (박)", "길이 (박)", "음높이"])
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        initial_pitches = [entry.member.pitch.ps for entry in entries]
+        initial_timing = [entry.timing for entry in entries]
+        for row, entry in enumerate(entries):
+            part = f"파트 {entry.part_index}"
+            if len(draft.parts) == 2:
+                part += " (위)" if entry.part_index == 1 else " (아래)"
+            if isinstance(entry.voice, stream.Voice):
+                part += f" · {entry.voice.id}"
+            pitch = entry.pitch_label
+            if entry.member.tie is not None:
+                pitch += " (붙임줄)"
+            start, duration = entry.timing
+            for column, value in enumerate((part, str(start), str(duration), pitch)):
+                table.setItem(row, column, QTableWidgetItem(value))
+        content.addWidget(table, 2)
+        layout.addLayout(content)
+
+        timing_controls = QHBoxLayout()
+        start_input = QLineEdit()
+        duration_input = QLineEdit()
+        apply_timing = QPushButton("박자 적용")
+        apply_timing.setAutoDefault(False)
+        for label, field in (("시작 위치 (박)", start_input), ("길이 (박)", duration_input)):
+            timing_controls.addWidget(QLabel(label))
+            field.setPlaceholderText("예: 1/2")
+            field.setMaximumWidth(95)
+            field.setMaxLength(28)
+            timing_controls.addWidget(field)
+        timing_controls.addWidget(apply_timing)
+        timing_controls.addStretch()
+        layout.addLayout(timing_controls)
+        timing_status = QLabel()
+        timing_status.setWordWrap(True)
+        layout.addWidget(timing_status)
+
+        lower = QPushButton("반음 내리기")
+        raise_pitch = QPushButton("반음 올리기")
+        listen = QPushButton("수정본 듣기")
+        stop = QPushButton("정지")
+        save = QPushButton("수정본 저장")
+        close = QPushButton("닫기")
+        save.setEnabled(False)
+        controls = QHBoxLayout()
+        for button in (lower, raise_pitch, listen, stop, save, close):
+            button.setAutoDefault(False)
+            controls.addWidget(button)
+        layout.addLayout(controls)
+
+        def update_controls() -> None:
+            row = table.currentRow()
+            editable = row >= 0 and entries[row].member.tie is None
+            lower.setEnabled(editable)
+            raise_pitch.setEnabled(editable)
+            can_change_timing = row >= 0 and not entries[row].event.duration.isGrace
+            for widget in (start_input, duration_input, apply_timing):
+                widget.setEnabled(can_change_timing)
+            start, duration = entries[row].timing if row >= 0 else ("", "")
+            start_input.setText(str(start))
+            duration_input.setText(str(duration))
+            position = positions[row] if row >= 0 else None
+            if not pixmap.isNull():
+                highlighted = pixmap.copy()
+                if position is not None:
+                    painter = QPainter(highlighted)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    painter.setPen(QPen(QColor("#0b61cc"), 2))
+                    painter.setBrush(QColor(56, 147, 250, 46))
+                    painter.drawEllipse(position, 7, 6)
+                    painter.end()
+                picture.setPixmap(highlighted)
+            marker_status.setText(
+                "" if position is not None or row < 0 else "이 음표의 원본 위치를 찾을 수 없습니다."
+            )
+            update_save_state()
+
+        def changed_timing():
+            return [entry for entry, initial in zip(entries, initial_timing) if entry.timing != initial]
+
+        def update_save_state() -> None:
+            edits = changed_timing()
+            row = table.currentRow()
+            if row >= 0:
+                timing_status.setText(
+                    f"마디 길이 {entries[row].bar_length}박 · 시작 위치 0부터 · 4분음표 = 1박"
+                )
+            try:
+                rhythm_gaps(edits)
+            except ValueError as error:
+                timing_status.setText(str(error))
+                save.setEnabled(False)
+                return
+            save.setEnabled(bool(edits) or any(
+                entry.member.pitch.ps != initial
+                for entry, initial in zip(entries, initial_pitches)
+            ))
+
+        def change_timing() -> None:
+            row = table.currentRow()
+            if row < 0:
+                return
+            try:
+                start = Fraction(start_input.text().strip())
+                duration = Fraction(duration_input.text().strip())
+            except (ValueError, ZeroDivisionError):
+                timing_status.setText("박자는 1/2 또는 0.5처럼 입력해 주세요.")
+                return
+            try:
+                entries[row].change_timing(start, duration)
+            except ValueError as error:
+                timing_status.setText(str(error))
+                return
+            self.stop_measure_preview()
+            for i, entry in enumerate(entries):
+                if entry.event is entries[row].event:
+                    start, duration = entry.timing
+                    table.item(i, 1).setText(str(start))
+                    table.item(i, 2).setText(str(duration))
+            update_controls()
+
+        def shift(semitones: int) -> None:
+            row = table.currentRow()
+            if row < 0:
+                return
+            try:
+                entries[row].shift(semitones)
+            except ValueError as error:
+                QMessageBox.information(dialog, "음높이 수정", str(error))
+                return
+            self.stop_measure_preview()
+            table.item(row, 3).setText(entries[row].pitch_label)
+            update_save_state()
+
+        def save_draft() -> None:
+            suggested = self.current_output.with_name(
+                f"{self.current_output.stem}_마디{measure}_수정.mid"
+            )
+            filename, _ = QFileDialog.getSaveFileName(
+                dialog, "수정한 MIDI와 MusicXML 저장", str(suggested),
+                "MIDI 파일 (*.mid)", options=QFileDialog.Option.DontConfirmOverwrite,
+            )
+            if not filename:
+                return
+            output = Path(filename)
+            if output.suffix.lower() != ".mid":
+                output = output.with_suffix(".mid")
+            try:
+                xml = save_pitch_edit(
+                    draft, output, self.result_bpm_input.value(), self.result_navigation_plan,
+                    timing_edits=changed_timing(),
+                )
+            except Exception as error:
+                QMessageBox.warning(dialog, "수정본 저장 실패", str(error))
+                return
+            self.stop_measure_preview()
+            QMessageBox.information(dialog, "수정본 저장 완료", f"{output}\n{xml}")
+            dialog.accept()
+
+        table.currentItemChanged.connect(update_controls)
+        table.setCurrentCell(0, 0)
+        update_controls()
+        apply_timing.clicked.connect(change_timing)
+        start_input.returnPressed.connect(change_timing)
+        duration_input.returnPressed.connect(change_timing)
+        lower.clicked.connect(lambda: shift(-1))
+        raise_pitch.clicked.connect(lambda: shift(1))
+        listen.clicked.connect(lambda: self.play_measure_preview(measure, score=draft))
+        stop.clicked.connect(self.stop_measure_preview)
+        save.clicked.connect(save_draft)
+        close.clicked.connect(dialog.reject)
+        self.player.stop()
+        try:
+            dialog.exec()
+        finally:
+            self.stop_measure_preview()
+            dialog.deleteLater()
+
     def set_review_status(self, status: str) -> None:
         item = self.problem_list.currentItem()
         if item is None or self.current_output is None:
@@ -774,6 +1032,7 @@ class Score2MidiWindow(QMainWindow):
         issue = item.data(Qt.ItemDataRole.UserRole)
         self.set_review_status("다시 인식")
         self.run_retry_button.setEnabled(False)
+        self.pitch_edit_button.setEnabled(False)
         self.new_conversion_button.setEnabled(False)
         self.review_status_label.setText(
             f"검토 상태: {issue.measure}마디 400DPI 재인식 중…"
@@ -791,6 +1050,9 @@ class Score2MidiWindow(QMainWindow):
         )
         self.retry_worker.finished.connect(
             lambda: self.new_conversion_button.setEnabled(True)
+        )
+        self.retry_worker.finished.connect(
+            lambda: self.pitch_edit_button.setEnabled(self.problem_list.currentItem() is not None)
         )
         self.retry_worker.start()
 
@@ -833,11 +1095,12 @@ class Score2MidiWindow(QMainWindow):
             self.review_status_label.setText(f"검토 상태: {status}")
             return
         try:
-            apply_retry_candidate(
+            self.result_score = apply_retry_candidate(
                 self.current_output.with_suffix(".musicxml"),
                 self.current_output,
                 retry,
                 self.result_bpm_input.value(),
+                self.result_navigation_plan,
             )
         except Exception as error:
             QMessageBox.critical(self, "재인식 결과 적용 실패", str(error))
